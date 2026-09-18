@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -43,6 +44,25 @@ func TestLocalDoHUsesDedicatedTransport(t *testing.T) {
 	_, err := f.send(context.Background(), &forwardQuery{packet: make([]byte, 12), family: "udp"}, resolverAndDelay{name: &dnstype.Resolver{Addr: endpoint, LocalOverride: true}})
 	if err != nil || !called {
 		t.Fatalf("local DoH transport not used: called=%v err=%v", called, err)
+	}
+}
+
+func TestLocalDoHFailureDoesNotFallbackOrLeakEndpoint(t *testing.T) {
+	const endpoint = "https://resolver.example/private-profile"
+	calls := 0
+	client := &http.Client{Transport: localDoHRoundTrip(func(r *http.Request) (*http.Response, error) {
+		calls++
+		return nil, errors.New("failure for " + endpoint)
+	})}
+	// No network dialer is installed: any attempt at plaintext fallback cannot
+	// succeed unnoticed. Composition tests separately assert a sole default.
+	f := &forwarder{logf: t.Logf, dohClient: map[string]*http.Client{"local:" + endpoint: client}}
+	_, err := f.send(t.Context(), &forwardQuery{packet: make([]byte, 12), family: "udp"}, resolverAndDelay{name: &dnstype.Resolver{Addr: endpoint, LocalOverride: true}})
+	if err == nil || calls != 1 {
+		t.Fatalf("failure/fallback result: calls=%d err=%v", calls, err)
+	}
+	if strings.Contains(err.Error(), "private-profile") || strings.Contains(err.Error(), "resolver.example") {
+		t.Fatal("private endpoint leaked in diagnostic error")
 	}
 }
 
