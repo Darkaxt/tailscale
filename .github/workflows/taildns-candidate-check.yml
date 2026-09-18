@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   verify:
-    if: github.actor == github.repository_owner && inputs.candidate_ref == 'automation/upstream-core'
+    if: (github.actor == github.repository_owner || github.actor == 'github-actions[bot]') && inputs.candidate_ref == 'automation/upstream-core'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
