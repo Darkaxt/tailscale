@@ -18,14 +18,17 @@ func (src *Resolver) Clone() *Resolver {
 	dst := new(Resolver)
 	*dst = *src
 	dst.BootstrapResolution = append(src.BootstrapResolution[:0:0], src.BootstrapResolution...)
+	dst.LocalBootstrapResolvers = append(src.LocalBootstrapResolvers[:0:0], src.LocalBootstrapResolvers...)
 	return dst
 }
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _ResolverCloneNeedsRegeneration = Resolver(struct {
-	Addr                string
-	BootstrapResolution []netip.Addr
-	UseWithExitNode     bool
+	Addr                    string
+	BootstrapResolution     []netip.Addr
+	UseWithExitNode         bool
+	LocalOverride           bool
+	LocalBootstrapResolvers []netip.Addr
 }{})
 
 // Clone duplicates src into dst and reports whether it succeeded.

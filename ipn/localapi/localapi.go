@@ -80,6 +80,7 @@ var handler = map[string]LocalAPIHandler{
 	"derpmap":              (*Handler).serveDERPMap,
 	"dns-config":           (*Handler).serveDNSConfig,
 	"goroutines":           (*Handler).serveGoroutines,
+	"local-dns":            (*Handler).serveLocalDNS,
 	"login-interactive":    (*Handler).serveLoginInteractive,
 	"logout":               (*Handler).serveLogout,
 	"peer-by-id":           (*Handler).servePeerByID,
@@ -1127,6 +1128,34 @@ func (h *Handler) serveCertDomains(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(domains)
+}
+
+// serveLocalDNS reads effective state or updates a profile-pinned local choice.
+func (h *Handler) serveLocalDNS(w http.ResponseWriter, r *http.Request) {
+	if !h.PermitRead {
+		http.Error(w, "local DNS access denied", http.StatusForbidden)
+		return
+	}
+	if r.Method == http.MethodPatch {
+		if !h.PermitWrite {
+			http.Error(w, "local DNS write denied", http.StatusForbidden)
+			return
+		}
+		var update ipn.LocalDNSUpdate
+		if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+			http.Error(w, "invalid local DNS update", http.StatusBadRequest)
+			return
+		}
+		if err := h.b.EditLocalDNS(h.Actor, update); err != nil {
+			http.Error(w, "local DNS update rejected; check profile, policy and endpoint", http.StatusBadRequest)
+			return
+		}
+	} else if r.Method != http.MethodGet {
+		http.Error(w, "GET or PATCH required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(h.b.LocalDNSStatus())
 }
 
 // serveDNSConfig returns the [tailcfg.DNSConfig] from the current netmap.

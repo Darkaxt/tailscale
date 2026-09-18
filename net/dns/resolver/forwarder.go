@@ -374,6 +374,9 @@ func newForwarder(logf logger.Logf, netMon *netmon.Monitor, linkSel ForwardLinkS
 
 func (f *forwarder) Close() error {
 	f.ctxCancel()
+	f.mu.Lock()
+	f.retireLocalDoHClientsLocked()
+	f.mu.Unlock()
 	return nil
 }
 
@@ -496,6 +499,7 @@ func (f *forwarder) setRoutes(routesBySuffix map[dnsname.FQDN][]*dnstype.Resolve
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.acceptDNS = acceptDNS
+	f.retireLocalDoHClientsLocked()
 	f.routes = routes
 	f.cloudHostFallback = cloudHostFallback
 }
@@ -625,6 +629,18 @@ var (
 //
 // send expects the reply to have the same txid as txidOut.
 func (f *forwarder) send(ctx context.Context, fq *forwardQuery, rr resolverAndDelay) (ret []byte, err error) {
+	if rr.name.LocalOverride {
+		client, err := f.getLocalDoHClient(rr.name)
+		if err != nil {
+			return nil, err
+		}
+		res, err := f.sendDoH(ctx, rr.name.Addr, client, fq.packet)
+		if err != nil {
+			// http errors can contain the complete private endpoint URL.
+			return nil, errors.New("local DoH query failed; no fallback attempted")
+		}
+		return checkResponseSizeAndSetTC(res, fq.packet, fq.family, f.logf), nil
+	}
 	if f.verboseFwd {
 		id := forwarderCount.Add(1)
 		domain, typ, _ := nameFromQuery(fq.packet)
@@ -1251,7 +1267,7 @@ func (f *forwarder) forwardWithDestChan(ctx context.Context, query packet, respo
 			}
 			resb, err := f.send(ctx, fq, *rr)
 			if err != nil {
-				err = fmt.Errorf("resolving using %q: %w", rr.name.Addr, err)
+				err = fmt.Errorf("resolving using %q: %w", rr.name.DiagnosticAddr(), err)
 				select {
 				case errc <- err:
 				case <-ctx.Done():
@@ -1327,7 +1343,7 @@ func (f *forwarder) forwardWithDestChan(ctx context.Context, query packet, respo
 					metricDNSFwdErrorContextGotError.Add(1)
 					var resolverAddrs []string
 					for _, rr := range resolvers {
-						resolverAddrs = append(resolverAddrs, rr.name.Addr)
+						resolverAddrs = append(resolverAddrs, rr.name.DiagnosticAddr())
 					}
 					if f.acceptDNS {
 						f.health.SetUnhealthy(dnsForwarderFailing, health.Args{health.ArgDNSServers: strings.Join(resolverAddrs, ",")})
@@ -1352,7 +1368,7 @@ func (f *forwarder) forwardWithDestChan(ctx context.Context, query packet, respo
 			// at least see what servers we're trying to query.
 			var resolverAddrs []string
 			for _, rr := range resolvers {
-				resolverAddrs = append(resolverAddrs, rr.name.Addr)
+				resolverAddrs = append(resolverAddrs, rr.name.DiagnosticAddr())
 			}
 			if f.acceptDNS {
 				f.health.SetUnhealthy(dnsForwarderFailing, health.Args{health.ArgDNSServers: strings.Join(resolverAddrs, ",")})

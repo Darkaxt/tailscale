@@ -41,6 +41,23 @@ type Resolver struct {
 	// there are situations where it is preferable to still use a Split DNS server and/or
 	// global DNS server instead of the exit node.
 	UseWithExitNode bool `json:",omitempty"`
+
+	// LocalOverride identifies the profile-local resolver, never a control-plane
+	// input. It requires route-aware transport and diagnostic redaction.
+	LocalOverride bool `json:"-"`
+
+	// LocalBootstrapResolvers are OS base nameservers captured before quad-100
+	// configuration. Only the local DoH hostname may be sent to them.
+	LocalBootstrapResolvers []netip.Addr `json:"-"`
+}
+
+// DiagnosticAddr is safe for routine logs and health messages. The actual
+// endpoint remains available to the authenticated local configuration UI.
+func (r *Resolver) DiagnosticAddr() string {
+	if r.LocalOverride {
+		return "<local-dns>"
+	}
+	return r.Addr
 }
 
 // IPPort returns r.Addr as an IP address and port if either
@@ -71,6 +88,8 @@ func (r *Resolver) Equal(other *Resolver) bool {
 	}
 
 	return r.Addr == other.Addr &&
+		r.LocalOverride == other.LocalOverride &&
+		slices.Equal(r.LocalBootstrapResolvers, other.LocalBootstrapResolvers) &&
 		slices.Equal(r.BootstrapResolution, other.BootstrapResolution) &&
 		r.UseWithExitNode == other.UseWithExitNode
 }

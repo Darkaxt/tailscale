@@ -113,12 +113,24 @@ func (v ResolverView) BootstrapResolution() views.Slice[netip.Addr] {
 // exit node is in use. Normally, DNS resolution is delegated to the exit node but
 // there are situations where it is preferable to still use a Split DNS server and/or
 // global DNS server instead of the exit node.
-func (v ResolverView) UseWithExitNode() bool      { return v.ж.UseWithExitNode }
+func (v ResolverView) UseWithExitNode() bool { return v.ж.UseWithExitNode }
+
+// LocalOverride identifies the profile-local resolver, never a control-plane
+// input. It requires route-aware transport and diagnostic redaction.
+func (v ResolverView) LocalOverride() bool { return v.ж.LocalOverride }
+
+// LocalBootstrapResolvers are OS base nameservers captured before quad-100
+// configuration. Only the local DoH hostname may be sent to them.
+func (v ResolverView) LocalBootstrapResolvers() views.Slice[netip.Addr] {
+	return views.SliceOf(v.ж.LocalBootstrapResolvers)
+}
 func (v ResolverView) Equal(v2 ResolverView) bool { return v.ж.Equal(v2.ж) }
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _ResolverViewNeedsRegeneration = Resolver(struct {
-	Addr                string
-	BootstrapResolution []netip.Addr
-	UseWithExitNode     bool
+	Addr                    string
+	BootstrapResolution     []netip.Addr
+	UseWithExitNode         bool
+	LocalOverride           bool
+	LocalBootstrapResolvers []netip.Addr
 }{})

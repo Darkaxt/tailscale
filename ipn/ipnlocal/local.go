@@ -331,10 +331,12 @@ type LocalBackend struct {
 	// before acquiring b.mu. This is used during shutdown to avoid deadlocks.
 	ignoreControlClientUpdates atomic.Bool
 
-	machinePrivKey key.MachinePrivate
-	tka            *tkaState // TODO(nickkhyl): move to nodeBackend
-	state          ipn.State // TODO(nickkhyl): move to nodeBackend
-	capTailnetLock bool      // whether netMap contains the tailnet lock capability
+	machinePrivKey          key.MachinePrivate
+	tka                     *tkaState // TODO(nickkhyl): move to nodeBackend
+	state                   ipn.State // TODO(nickkhyl): move to nodeBackend
+	localDNSAppliedEndpoint string    // guarded by mu; never log
+	localDNSAppliedProfile  ipn.ProfileID
+	capTailnetLock          bool // whether netMap contains the tailnet lock capability
 	// hostinfo is mutated in-place while mu is held.
 	hostinfo          *tailcfg.Hostinfo      // TODO(nickkhyl): move to nodeBackend
 	nmExpiryTimer     tstime.TimerController // for updating netMap on node expiry; can be nil; TODO(nickkhyl): move to nodeBackend
@@ -2382,6 +2384,11 @@ func (b *LocalBackend) sysPolicyChanged(policy policyclient.PolicyChange) {
 
 	if prefs, anyChange := b.reconcilePrefs(); anyChange {
 		b.logf("syspolicy: changed profile prefs: %v", prefs.Pretty())
+	}
+	if policy.HasChanged(pkey.EnableTailscaleDNS) {
+		// Policy can take ownership without changing CorpDNS (already true).
+		// Re-compose DNS so a previously installed local override is removed.
+		b.authReconfig()
 	}
 }
 
@@ -4958,6 +4965,17 @@ func (b *LocalBackend) checkPrefsLocked(p *ipn.Prefs) error {
 		// Keep this one just for testing.
 		errs = append(errs, errors.New("bad hostname [test]"))
 	}
+	if p.LocalDNSOverride || p.LocalDNSResolver != "" {
+		if err := ipn.ValidateLocalDNSResolver(p.LocalDNSResolver); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if p.LocalDNSOverride {
+		policy, err := b.polc.GetPreferenceOption(pkey.EnableTailscaleDNS, ptype.ShowChoiceByPolicy)
+		if err != nil || !policy.Show() {
+			errs = append(errs, errors.New("local DNS override is unavailable under managed DNS policy"))
+		}
+	}
 	if err := b.checkProfileNameLocked(p); err != nil {
 		errs = append(errs, err)
 	}
@@ -5444,7 +5462,15 @@ func (b *LocalBackend) editPrefsLocked(actor ipnauth.Actor, mp *ipn.MaskedPrefs)
 	p1 := b.pm.CurrentPrefs().AsStruct()
 	p1.ApplyEdits(mp)
 
-	if err := b.checkPrefsLocked(p1); err != nil {
+	validationPrefs := p1
+	if !mp.LocalDNSOverrideSet && !mp.LocalDNSResolverSet && p1.LocalDNSOverride {
+		// A policy-disabled saved choice must not prevent unrelated edits,
+		// particularly disconnecting. Only a new local DNS edit is subject
+		// to the local-override policy rejection; retain the stored choice.
+		validationPrefs = p1.Clone()
+		validationPrefs.LocalDNSOverride = false
+	}
+	if err := b.checkPrefsLocked(validationPrefs); err != nil {
 		b.logf("EditPrefs check error: %v", err)
 		return ipn.PrefsView{}, err
 	}
@@ -6070,7 +6096,18 @@ func (b *LocalBackend) authReconfigLocked() {
 	hasPAC := b.interfaceState.HasPAC()
 	disableSubnetsIfPAC := cn.SelfHasCap(tailcfg.NodeAttrDisableSubnetsIfPAC)
 	dohURL, dohURLOK := cn.exitNodeCanProxyDNS(prefs.ExitNodeID())
-	dcfg := cn.dnsConfigForNetmap(prefs, b.keyExpired, cmp.Or(b.goos, runtime.GOOS))
+	dnsPrefs := prefs
+	if prefs.LocalDNSOverride() {
+		policy, err := b.polc.GetPreferenceOption(pkey.EnableTailscaleDNS, ptype.ShowChoiceByPolicy)
+		if err != nil || !policy.Show() {
+			// Keep the user's stored choice, but do not apply it while policy
+			// owns DNS. This also handles policy changes after preference save.
+			p := prefs.AsStruct()
+			p.LocalDNSOverride = false
+			dnsPrefs = p.View()
+		}
+	}
+	dcfg := cn.dnsConfigForNetmap(dnsPrefs, b.keyExpired, cmp.Or(b.goos, runtime.GOOS))
 	// If the current node is an app connector, ensure the app connector machine is started
 	b.reconfigAppConnectorLocked(nm.SelfNode, prefs)
 
@@ -6155,6 +6192,12 @@ func (b *LocalBackend) authReconfigLocked() {
 	b.setDataPlanePeerRoutes()
 
 	err := b.e.Reconfig(cfg, rcfg, dcfg)
+	b.localDNSAppliedEndpoint = ""
+	b.localDNSAppliedProfile = ""
+	if (err == nil || err == wgengine.ErrNoChanges) && dcfg != nil && len(dcfg.DefaultResolvers) == 1 && dcfg.DefaultResolvers[0].LocalOverride {
+		b.localDNSAppliedEndpoint = dcfg.DefaultResolvers[0].Addr
+		b.localDNSAppliedProfile = b.pm.CurrentProfile().ID()
+	}
 	if err == wgengine.ErrNoChanges {
 		return
 	}
