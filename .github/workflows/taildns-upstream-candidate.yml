@@ -1,0 +1,90 @@
+name: TailDNS core upstream candidate
+
+on:
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Detect and merge locally without pushing a branch or pull request
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: taildns-core-upstream-candidate
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    if: github.repository == 'Darkaxt/tailscale'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: local-dns-override
+          fetch-depth: 0
+      - name: Detect and prepare reviewable core candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=local-dns-override
+          branch=automation/upstream-core
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git remote add canonical https://github.com/tailscale/tailscale.git
+          git fetch --no-tags canonical refs/heads/main:refs/remotes/canonical/main
+          git fetch --no-tags origin "$base"
+          upstream_head="$(git rev-parse refs/remotes/canonical/main)"
+          base_head="$(git rev-parse "origin/$base")"
+          {
+            echo '### TailDNS core upstream detection'
+            echo
+            echo "- Feature base: \`$base_head\`"
+            echo "- Canonical core: \`$upstream_head\`"
+            echo "- Dry run: \`$DRY_RUN\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if git merge-base --is-ancestor "$upstream_head" "$base_head"; then
+            echo 'No upstream core change is pending.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git checkout -B "$branch" "$base_head"
+          if ! git merge --no-ff --no-edit "$upstream_head"; then
+            {
+              echo
+              echo 'Merge conflict; no branch, pull request, tag, release, or signing job was created.'
+              git diff --name-only --diff-filter=U
+            } >> "$GITHUB_STEP_SUMMARY"
+            git merge --abort || true
+            exit 1
+          fi
+          if [[ "$DRY_RUN" == true ]]; then
+            echo 'Candidate composed locally; no branch, pull request, tag, release, or signing job was created.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git push --force-with-lease origin "HEAD:refs/heads/$branch"
+          body="$RUNNER_TEMP/upstream-core-pr.md"
+          cat > "$body" <<EOF
+          Automated shared-core review candidate only; it cannot sign or publish TailDNS.
+
+          - TailDNS feature base: \`$base_head\`
+          - Canonical Tailscale core: \`$upstream_head\`
+          - Pull-request checks run with read-only repository access and no signing secrets.
+
+          After review and passing checks, merge into \`local-dns-override\`. The Android updater can then propose the exact new module pin. Rollback is closing this pull request and deleting \`$branch\`; the current Android source and public release are unchanged.
+          EOF
+          pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --base "$base" --state open --json number --jq '.[0].number // empty')"
+          if [[ -n "$pr" ]]; then
+            gh pr edit "$pr" --repo "$GITHUB_REPOSITORY" --title 'Update TailDNS core from upstream' --body-file "$body"
+          else
+            gh pr create --repo "$GITHUB_REPOSITORY" --head "$branch" --base "$base" --title 'Update TailDNS core from upstream' --body-file "$body"
+          fi
+          gh workflow run taildns-candidate-check.yml --repo "$GITHUB_REPOSITORY" --ref main -f candidate_ref="$branch"

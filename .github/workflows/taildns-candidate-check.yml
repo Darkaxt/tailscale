@@ -1,0 +1,30 @@
+name: TailDNS core candidate checks
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_ref:
+        description: Candidate branch to verify with the trusted default-branch workflow
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.actor == github.repository_owner && inputs.candidate_ref == 'automation/upstream-core'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.candidate_ref }}
+      - name: Verify affected core surfaces without secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          go_bin="$(./tool/go env GOROOT)/bin/go"
+          "$go_bin" test -mod=readonly ./ipn/... ./net/dns/... ./client/local ./cmd/taildns ./safesocket -count=1
+          env CGO_ENABLED=0 GOOS=windows GOARCH=amd64 "$go_bin" build -trimpath -o "$RUNNER_TEMP/taildns.exe" ./cmd/taildns
+          env CGO_ENABLED=0 GOOS=windows GOARCH=amd64 "$go_bin" build -trimpath -o "$RUNNER_TEMP/taildnsd.exe" ./cmd/tailscaled
+          env CGO_ENABLED=0 GOOS=windows GOARCH=amd64 "$go_bin" build -trimpath -o "$RUNNER_TEMP/tailscale.exe" ./cmd/tailscale
