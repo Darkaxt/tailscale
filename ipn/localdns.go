@@ -24,6 +24,8 @@ type LocalDNSStatus struct {
 	FollowAndroid  bool
 	ManualEndpoint string
 	SystemMode     string
+	// LastValidEndpoint is in-memory diagnostic history, never a fallback.
+	LastValidEndpoint string
 }
 
 // LocalDNSUpdate pins a UI edit to the profile from which it was loaded.

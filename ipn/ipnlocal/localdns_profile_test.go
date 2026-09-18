@@ -53,6 +53,13 @@ func TestLocalDNSFollowProfileIsolation(t *testing.T) {
 	if err := b.EditLocalDNS(nil, ipn.LocalDNSUpdate{ProfileID: first.ID(), Enabled: true, FollowAndroid: true}); err == nil {
 		t.Fatal("old editor crossed profile boundary")
 	}
+	addProfile(3, "third", true)
+	host = "unsupported.example"
+	b.NotifyLocalDNSPlatformChanged()
+	if status := b.LocalDNSStatus(); status.Endpoint != "" || status.LastValidEndpoint != "" {
+		t.Fatal("diagnostic history crossed profile ownership")
+	}
+	host = "changed.dns.controld.com"
 	if _, _, err := b.pm.SwitchToProfileByID(first.ID()); err != nil {
 		t.Fatal(err)
 	}
