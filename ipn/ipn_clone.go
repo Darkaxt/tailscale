@@ -83,6 +83,7 @@ var _PrefsCloneNeedsRegeneration = Prefs(struct {
 	CorpDNS                    bool
 	LocalDNSOverride           bool
 	LocalDNSResolver           string
+	LocalDNSFollowAndroid      bool
 	RunSSH                     bool
 	RunWebClient               bool
 	WantRunning                bool

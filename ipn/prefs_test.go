@@ -47,6 +47,7 @@ func TestPrefsEqual(t *testing.T) {
 		"CorpDNS",
 		"LocalDNSOverride",
 		"LocalDNSResolver",
+		"LocalDNSFollowAndroid",
 		"RunSSH",
 		"RunWebClient",
 		"WantRunning",

@@ -303,6 +303,10 @@ func (v PrefsView) LocalDNSOverride() bool { return v.ж.LocalDNSOverride }
 // identify a provider account and must not appear in diagnostic logs.
 func (v PrefsView) LocalDNSResolver() string { return v.ж.LocalDNSResolver }
 
+// LocalDNSFollowAndroid selects the live platform source, retaining the
+// independent manual endpoint above. Never persist a copied system provider.
+func (v PrefsView) LocalDNSFollowAndroid() bool { return v.ж.LocalDNSFollowAndroid }
+
 // RunSSH bool is whether this node should run an SSH
 // server, permitting access to peers according to the
 // policies as configured by the Tailnet's admin(s).
@@ -508,6 +512,7 @@ var _PrefsViewNeedsRegeneration = Prefs(struct {
 	CorpDNS                    bool
 	LocalDNSOverride           bool
 	LocalDNSResolver           string
+	LocalDNSFollowAndroid      bool
 	RunSSH                     bool
 	RunWebClient               bool
 	WantRunning                bool

@@ -331,12 +331,16 @@ type LocalBackend struct {
 	// before acquiring b.mu. This is used during shutdown to avoid deadlocks.
 	ignoreControlClientUpdates atomic.Bool
 
-	machinePrivKey          key.MachinePrivate
-	tka                     *tkaState // TODO(nickkhyl): move to nodeBackend
-	state                   ipn.State // TODO(nickkhyl): move to nodeBackend
-	localDNSAppliedEndpoint string    // guarded by mu; never log
-	localDNSAppliedProfile  ipn.ProfileID
-	capTailnetLock          bool // whether netMap contains the tailnet lock capability
+	machinePrivKey            key.MachinePrivate
+	tka                       *tkaState // TODO(nickkhyl): move to nodeBackend
+	state                     ipn.State // TODO(nickkhyl): move to nodeBackend
+	localDNSAppliedEndpoint   string    // guarded by mu; never log
+	localDNSAppliedProfile    ipn.ProfileID
+	localDNSReadPlatform      func() (hostname, mode string, err error)
+	localDNSObservePlatform   func(bool) error
+	localDNSObserving         bool
+	localDNSObservationFailed bool
+	capTailnetLock            bool // whether netMap contains the tailnet lock capability
 	// hostinfo is mutated in-place while mu is held.
 	hostinfo          *tailcfg.Hostinfo      // TODO(nickkhyl): move to nodeBackend
 	nmExpiryTimer     tstime.TimerController // for updating netMap on node expiry; can be nil; TODO(nickkhyl): move to nodeBackend
@@ -1310,6 +1314,7 @@ func (b *LocalBackend) Shutdown() {
 		return
 	}
 	b.shutdownCalled = true
+	b.syncLocalDNSObservationLocked()
 
 	b.shutdownCertRefreshLoopLocked()
 
@@ -4965,7 +4970,7 @@ func (b *LocalBackend) checkPrefsLocked(p *ipn.Prefs) error {
 		// Keep this one just for testing.
 		errs = append(errs, errors.New("bad hostname [test]"))
 	}
-	if p.LocalDNSOverride || p.LocalDNSResolver != "" {
+	if p.LocalDNSOverride && !p.LocalDNSFollowAndroid || p.LocalDNSResolver != "" {
 		if err := ipn.ValidateLocalDNSResolver(p.LocalDNSResolver); err != nil {
 			errs = append(errs, err)
 		}
@@ -6072,6 +6077,7 @@ func (b *LocalBackend) authReconfig() {
 //
 // b.mu must be held.
 func (b *LocalBackend) authReconfigLocked() {
+	b.syncLocalDNSObservationLocked()
 	if b.shutdownCalled {
 		b.logf("[v1] authReconfig: skipping because in shutdown")
 		return
@@ -6097,6 +6103,11 @@ func (b *LocalBackend) authReconfigLocked() {
 	disableSubnetsIfPAC := cn.SelfHasCap(tailcfg.NodeAttrDisableSubnetsIfPAC)
 	dohURL, dohURLOK := cn.exitNodeCanProxyDNS(prefs.ExitNodeID())
 	dnsPrefs := prefs
+	if prefs.LocalDNSOverride() && prefs.LocalDNSFollowAndroid() {
+		p := prefs.AsStruct()
+		p.LocalDNSResolver, _, _ = b.localDNSPlatformEndpointLocked()
+		dnsPrefs = p.View()
+	}
 	if prefs.LocalDNSOverride() {
 		policy, err := b.polc.GetPreferenceOption(pkey.EnableTailscaleDNS, ptype.ShowChoiceByPolicy)
 		if err != nil || !policy.Show() {
