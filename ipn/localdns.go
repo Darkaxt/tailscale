@@ -16,18 +16,57 @@ import (
 // LocalDNSStatus distinguishes a saved choice from a successfully applied
 // engine configuration. Applied is not an assertion of provider reachability.
 type LocalDNSStatus struct {
-	ProfileID  ProfileID
-	Configured bool
-	Endpoint   string
-	Applied    bool
-	Reason     string
+	ProfileID      ProfileID
+	Configured     bool
+	Endpoint       string
+	Applied        bool
+	Reason         string
+	FollowAndroid  bool
+	ManualEndpoint string
+	SystemMode     string
 }
 
 // LocalDNSUpdate pins a UI edit to the profile from which it was loaded.
 type LocalDNSUpdate struct {
-	ProfileID ProfileID
-	Enabled   bool
-	Endpoint  string
+	ProfileID     ProfileID
+	Enabled       bool
+	Endpoint      string
+	FollowAndroid bool
+}
+
+// AndroidDNSProvider maps only documented provider hostnames. Errors never
+// contain identifiers; unknown providers are not inferred from their hostname.
+func AndroidDNSProvider(host string) (string, error) {
+	invalid := errors.New("saved Android provider is missing, invalid or unsupported")
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	const suffix = ".dns.controld.com"
+	if !strings.HasSuffix(host, suffix) || dnsname.ValidHostname(host) != nil {
+		return "", invalid
+	}
+	label := strings.TrimSuffix(host, suffix)
+	if len(label) == 0 || len(label) > 63 {
+		return "", invalid
+	}
+	id, client, hasClient := strings.Cut(label, "-")
+	alnum := func(s string, hyphens bool) bool {
+		if s == "" {
+			return false
+		}
+		for _, c := range s {
+			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || hyphens && c == '-') {
+				return false
+			}
+		}
+		return true
+	}
+	if !alnum(id, false) || hasClient && !alnum(client, true) {
+		return "", invalid
+	}
+	endpoint := "https://dns.controld.com/" + id
+	if hasClient {
+		endpoint += "/" + client
+	}
+	return endpoint, nil
 }
 
 // ValidateLocalDNSResolver checks the fork's deliberately restricted DoH input

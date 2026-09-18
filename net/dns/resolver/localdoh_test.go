@@ -47,6 +47,16 @@ func TestLocalDoHUsesDedicatedTransport(t *testing.T) {
 	}
 }
 
+func TestLocalDoHUnavailableSourceFailsClosed(t *testing.T) {
+	f := &forwarder{logf: t.Logf}
+	// An unavailable followed source is still the sole default route, with
+	// an empty endpoint. It must error before any network dial or fallback.
+	_, err := f.send(t.Context(), &forwardQuery{packet: make([]byte, 12), family: "udp"}, resolverAndDelay{name: &dnstype.Resolver{LocalOverride: true}})
+	if err == nil {
+		t.Fatal("unavailable followed source did not fail closed")
+	}
+}
+
 func TestLocalDoHFailureDoesNotFallbackOrLeakEndpoint(t *testing.T) {
 	const endpoint = "https://resolver.example/private-profile"
 	calls := 0

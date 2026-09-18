@@ -140,6 +140,9 @@ type Prefs struct {
 	// LocalDNSResolver is retained when the override is disabled. Its path can
 	// identify a provider account and must not appear in diagnostic logs.
 	LocalDNSResolver string
+	// LocalDNSFollowAndroid selects the live platform source, retaining the
+	// independent manual endpoint above. Never persist a copied system provider.
+	LocalDNSFollowAndroid bool
 
 	// RunSSH bool is whether this node should run an SSH
 	// server, permitting access to peers according to the
@@ -373,6 +376,7 @@ type MaskedPrefs struct {
 	CorpDNSSet                    bool                `json:",omitempty"`
 	LocalDNSOverrideSet           bool                `json:",omitempty"`
 	LocalDNSResolverSet           bool                `json:",omitempty"`
+	LocalDNSFollowAndroidSet      bool                `json:",omitempty"`
 	RunSSHSet                     bool                `json:",omitempty"`
 	RunWebClientSet               bool                `json:",omitempty"`
 	WantRunningSet                bool                `json:",omitempty"`
@@ -690,6 +694,7 @@ func (p *Prefs) Equals(p2 *Prefs) bool {
 		p.CorpDNS == p2.CorpDNS &&
 		p.LocalDNSOverride == p2.LocalDNSOverride &&
 		p.LocalDNSResolver == p2.LocalDNSResolver &&
+		p.LocalDNSFollowAndroid == p2.LocalDNSFollowAndroid &&
 		p.RunSSH == p2.RunSSH &&
 		p.Sync.Normalized() == p2.Sync.Normalized() &&
 		p.RunWebClient == p2.RunWebClient &&
