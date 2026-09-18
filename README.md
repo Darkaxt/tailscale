@@ -1,5 +1,7 @@
 # Tailscale
 
+> **TailDNS fork:** branch [`local-dns-override`](https://github.com/Darkaxt/tailscale/tree/local-dns-override) adds the shared local DNS override used by the [TailDNS Android fork](https://github.com/Darkaxt/tailscale-android) and an independently branded Windows command-line frontend. It is not an official Tailscale product. See the [Windows companion guide](docs/taildns-windows.md) and the Android fork's [authoritative specification](https://github.com/Darkaxt/tailscale-android/blob/main/docs/local-dns-override/SPECIFICATION.md).
+
 https://tailscale.com
 
 Private WireGuard® networks made easy
