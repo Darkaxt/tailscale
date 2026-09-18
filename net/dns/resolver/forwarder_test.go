@@ -1887,6 +1887,51 @@ func TestForwarderHealthOnContextExpiry(t *testing.T) {
 	}
 }
 
+// TestForwarderHealthOnResolverFailure verifies that an ordinary failed query
+// marks the configured DNS resolvers unhealthy even when the synthesized
+// SERVFAIL response can be delivered immediately. The warning must not depend
+// on the client abandoning the query first.
+func TestForwarderHealthOnResolverFailure(t *testing.T) {
+	const domain = "health-failure.example.com."
+
+	for _, acceptDNS := range []bool{true, false} {
+		t.Run(fmt.Sprintf("acceptDNS=%v", acceptDNS), func(t *testing.T) {
+			request := makeTestRequest(t, domain, dns.TypeA, 0)
+			logf := tstest.WhileTestRunningLogger(t)
+			bus := eventbustest.NewBus(t)
+			netMon, err := netmon.New(bus, logf)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var dialer tsdial.Dialer
+			dialer.SetNetMon(netMon)
+			dialer.SetBus(bus)
+
+			ht := health.NewTracker(bus)
+			fwd := newForwarder(logf, netMon, nil, &dialer, ht, nil)
+			fwd.acceptDNS = acceptDNS
+
+			port := runDNSServer(t, nil, makeTestResponse(t, domain, dns.RCodeServerFailure), func(bool, []byte) {})
+			resolvers := []resolverAndDelay{{name: &dnstype.Resolver{Addr: fmt.Sprintf("127.0.0.1:%d", port)}}}
+			rpkt := packet{
+				bs:     request,
+				family: "udp",
+				addr:   netip.MustParseAddrPort("127.0.0.1:12345"),
+			}
+
+			responseChan := make(chan packet, 1)
+			if err := fwd.forwardWithDestChan(context.Background(), rpkt, responseChan, resolvers...); err != nil {
+				t.Fatalf("forwardWithDestChan: %v", err)
+			}
+
+			if got := ht.IsUnhealthy(dnsForwarderFailing); got != acceptDNS {
+				t.Errorf("IsUnhealthy = %v, want %v", got, acceptDNS)
+			}
+		})
+	}
+}
+
 // TestForwarderHealthNoUpstreamResolvers verifies that a query with no upstream
 // resolver never raises dnsForwarderFailing, regardless of acceptDNS; that
 // warning is reserved for resolvers we found but couldn't reach (see
