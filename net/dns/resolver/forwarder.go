@@ -1337,6 +1337,13 @@ func (f *forwarder) forwardWithDestChan(ctx context.Context, query packet, respo
 					}
 					res = packet{rcodeErr.res, query.family, query.addr}
 				}
+				if sawNonRefused && f.acceptDNS {
+					var resolverAddrs []string
+					for _, rr := range resolvers {
+						resolverAddrs = append(resolverAddrs, rr.name.DiagnosticAddr())
+					}
+					f.health.SetUnhealthy(dnsForwarderFailing, health.Args{health.ArgDNSServers: strings.Join(resolverAddrs, ",")})
+				}
 				select {
 				case <-ctx.Done():
 					metricDNSFwdErrorContext.Add(1)
