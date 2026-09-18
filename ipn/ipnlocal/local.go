@@ -347,6 +347,8 @@ type LocalBackend struct {
 	localDNSObservePlatform   func(bool) error
 	localDNSObserving         bool
 	localDNSObservationFailed bool
+	localDNSLastValidEndpoint string // diagnostic only, never selected or logged
+	localDNSLastValidProfile  ipn.ProfileID
 	capTailnetLock            bool // whether netMap contains the tailnet lock capability
 	// hostinfo is mutated in-place while mu is held.
 	hostinfo          *tailcfg.Hostinfo      // TODO(nickkhyl): move to nodeBackend

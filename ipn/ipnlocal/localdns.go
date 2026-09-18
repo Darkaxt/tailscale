@@ -65,6 +65,11 @@ func (b *LocalBackend) syncLocalDNSObservationLocked() {
 }
 
 func (b *LocalBackend) localDNSPlatformEndpointLocked() (endpoint, mode string, err error) {
+	profile := b.pm.CurrentProfile().ID()
+	if b.localDNSLastValidProfile != profile {
+		b.localDNSLastValidEndpoint = ""
+		b.localDNSLastValidProfile = profile
+	}
 	if b.localDNSReadPlatform == nil || b.localDNSObservationFailed {
 		return "", "", errors.New("Android provider observation unavailable")
 	}
@@ -73,6 +78,9 @@ func (b *LocalBackend) localDNSPlatformEndpointLocked() (endpoint, mode string, 
 		return "", mode, errors.New("Android provider could not be read")
 	}
 	endpoint, err = ipn.AndroidDNSProvider(host)
+	if err == nil {
+		b.localDNSLastValidEndpoint = endpoint
+	}
 	return endpoint, mode, err
 }
 
@@ -100,6 +108,9 @@ func (b *LocalBackend) LocalDNSStatus() ipn.LocalDNSStatus {
 	var sourceErr error
 	if s.Configured && s.FollowAndroid {
 		s.Endpoint, s.SystemMode, sourceErr = b.localDNSPlatformEndpointLocked()
+		if sourceErr != nil {
+			s.LastValidEndpoint = b.localDNSLastValidEndpoint
+		}
 	}
 	switch {
 	case !s.Configured:

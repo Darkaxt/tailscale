@@ -44,6 +44,9 @@ func TestLocalDNSFollowSource(t *testing.T) {
 	if b.localDNSAppliedEndpoint != "" {
 		t.Fatal("unsupported source left stale provider applied")
 	}
+	if s := b.LocalDNSStatus(); s.Endpoint != "" || s.LastValidEndpoint != "https://dns.controld.com/first" {
+		t.Fatal("failed source did not retain a diagnostic-only previous endpoint")
+	}
 	if b.Prefs().LocalDNSResolver() != "https://manual.example/query" {
 		t.Fatal("follow overwrote manual endpoint")
 	}
