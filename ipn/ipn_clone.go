@@ -82,6 +82,8 @@ var _PrefsCloneNeedsRegeneration = Prefs(struct {
 	InternalExitNodePrior      tailcfg.StableNodeID
 	ExitNodeAllowLANAccess     bool
 	CorpDNS                    bool
+	LocalDNSOverride           bool
+	LocalDNSResolver           string
 	RunSSH                     bool
 	RunWebClient               bool
 	WantRunning                bool

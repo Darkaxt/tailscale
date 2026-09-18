@@ -154,6 +154,10 @@ func WriteIPPorts(w *bufio.Writer, vv []netip.AddrPort) {
 
 // WriteDNSResolver writes r to w.
 func WriteDNSResolver(w *bufio.Writer, r *dnstype.Resolver) {
+	if r.LocalOverride {
+		io.WriteString(w, "<local-dns>")
+		return
+	}
 	io.WriteString(w, r.Addr)
 	if len(r.BootstrapResolution) > 0 {
 		w.WriteByte('(')

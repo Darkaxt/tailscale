@@ -134,6 +134,13 @@ type Prefs struct {
 	// the "tailscale set --accept-dns=" flag.
 	CorpDNS bool
 
+	// LocalDNSOverride selects LocalDNSResolver instead of the tailnet's default
+	// resolvers. It is local to this profile and does not change specific routes.
+	LocalDNSOverride bool
+	// LocalDNSResolver is retained when the override is disabled. Its path can
+	// identify a provider account and must not appear in diagnostic logs.
+	LocalDNSResolver string
+
 	// RunSSH bool is whether this node should run an SSH
 	// server, permitting access to peers according to the
 	// policies as configured by the Tailnet's admin(s).
@@ -364,6 +371,8 @@ type MaskedPrefs struct {
 	InternalExitNodePriorSet      bool                `json:",omitempty"` // Internal; can't be set by LocalAPI clients
 	ExitNodeAllowLANAccessSet     bool                `json:",omitempty"`
 	CorpDNSSet                    bool                `json:",omitempty"`
+	LocalDNSOverrideSet           bool                `json:",omitempty"`
+	LocalDNSResolverSet           bool                `json:",omitempty"`
 	RunSSHSet                     bool                `json:",omitempty"`
 	RunWebClientSet               bool                `json:",omitempty"`
 	WantRunningSet                bool                `json:",omitempty"`
@@ -508,6 +517,10 @@ func (m *MaskedPrefs) Pretty() string {
 				}
 				first = false
 				f := mpv.Field(i - 1)
+				if name == "LocalDNSResolverSet" {
+					sb.WriteString("LocalDNSResolver=<redacted>")
+					continue
+				}
 				fmt.Fprintf(&sb, format(f),
 					strings.TrimSuffix(name, "Set"),
 					f.Interface())
@@ -675,6 +688,8 @@ func (p *Prefs) Equals(p2 *Prefs) bool {
 		p.InternalExitNodePrior == p2.InternalExitNodePrior &&
 		p.ExitNodeAllowLANAccess == p2.ExitNodeAllowLANAccess &&
 		p.CorpDNS == p2.CorpDNS &&
+		p.LocalDNSOverride == p2.LocalDNSOverride &&
+		p.LocalDNSResolver == p2.LocalDNSResolver &&
 		p.RunSSH == p2.RunSSH &&
 		p.Sync.Normalized() == p2.Sync.Normalized() &&
 		p.RunWebClient == p2.RunWebClient &&
