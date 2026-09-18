@@ -6784,6 +6784,9 @@ func (b *LocalBackend) enterStateLocked(newState ipn.State) {
 	cn := b.currentNode()
 	oldState := b.state
 	b.setStateLocked(newState)
+	// Stopped/NeedsLogin transitions can bypass authReconfigLocked. Keep
+	// platform observation in sync even when the state does not change.
+	b.syncLocalDNSObservationLocked()
 	prefs := b.pm.CurrentPrefs()
 
 	// Some temporary (2024-05-05) debugging code to help us catch

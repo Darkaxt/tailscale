@@ -113,3 +113,23 @@ func TestLocalDNSFollowObservationFailureAndModeStatus(t *testing.T) {
 		t.Fatal("automatic mode did not recover status")
 	}
 }
+
+func TestLocalDNSFollowDisconnectUnregistersImmediately(t *testing.T) {
+	b := newTestBackend(t)
+	p := &ipn.Prefs{CorpDNS: true, WantRunning: true, LocalDNSOverride: true, LocalDNSFollowAndroid: true, Persist: &persist.Persist{PrivateNodeKey: key.NewNode()}}
+	if err := b.pm.SetPrefs(p.View(), ipn.NetworkProfile{}); err != nil {
+		t.Fatal(err)
+	}
+	b.state = ipn.Running
+	observing := false
+	b.SetLocalDNSPlatform(func() (string, string, error) { return "test.dns.controld.com", "opportunistic", nil }, func(enabled bool) error { observing = enabled; return nil })
+	if !observing {
+		t.Fatal("test setup did not register")
+	}
+	if _, err := b.EditPrefs(&ipn.MaskedPrefs{WantRunningSet: true}); err != nil {
+		t.Fatal(err)
+	}
+	if observing {
+		t.Fatal("disconnect retained observer until another settings event")
+	}
+}
