@@ -45,13 +45,16 @@ func (b *LocalBackend) SetLocalDNSPlatform(read func() (string, string, error), 
 }
 
 func (b *LocalBackend) syncLocalDNSObservationLocked() {
+	if b.localDNSObservePlatform == nil {
+		return
+	}
 	p := b.pm.CurrentPrefs()
 	want := !b.shutdownCalled && p.Valid() && p.LocalDNSOverride() && p.LocalDNSFollowAndroid() && p.WantRunning() && !p.LoggedOut() && p.CorpDNS()
 	if want {
 		policy, err := b.polc.GetPreferenceOption(pkey.EnableTailscaleDNS, ptype.ShowChoiceByPolicy)
 		want = err == nil && policy.Show()
 	}
-	if b.localDNSObservePlatform == nil || want == b.localDNSObserving {
+	if want == b.localDNSObserving {
 		return
 	}
 	err := b.localDNSObservePlatform(want)
