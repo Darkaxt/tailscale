@@ -15,6 +15,7 @@ import (
 
 	"github.com/tailscale/go-winio"
 	"golang.org/x/sys/windows"
+	"tailscale.com/util/winutil"
 )
 
 func connect(ctx context.Context, path string) (net.Conn, error) {
@@ -31,10 +32,17 @@ func connect(ctx context.Context, path string) (net.Conn, error) {
 var windowsSDDL = "O:BAG:BAD:PAI(A;OICI;GWGR;;;BU)(A;OICI;GWGR;;;SY)"
 
 func listen(path string) (net.Listener, error) {
+	securityDescriptor := windowsSDDL
+	if !winutil.IsCurrentProcessElevated() {
+		// A standard user cannot assign the built-in Administrators group as
+		// the pipe owner. Let Windows derive a per-user descriptor instead;
+		// elevated service processes retain the shared service descriptor.
+		securityDescriptor = ""
+	}
 	lc, err := winio.ListenPipe(
 		path,
 		&winio.PipeConfig{
-			SecurityDescriptor: windowsSDDL,
+			SecurityDescriptor: securityDescriptor,
 			InputBufferSize:    256 * 1024,
 			OutputBufferSize:   256 * 1024,
 		},
