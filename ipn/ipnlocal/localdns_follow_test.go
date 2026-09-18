@@ -89,6 +89,21 @@ func TestLocalDNSFollowReadDenied(t *testing.T) {
 	}
 }
 
+func TestLocalDNSFollowMaskedEditValidation(t *testing.T) {
+	b := newTestBackend(t)
+	p := &ipn.Prefs{CorpDNS: true, LocalDNSOverride: true, LocalDNSFollowAndroid: true}
+	if err := b.pm.SetPrefs(p.View(), ipn.NetworkProfile{}); err != nil {
+		t.Fatal(err)
+	}
+	before := b.Prefs()
+	if _, err := b.EditPrefs(&ipn.MaskedPrefs{LocalDNSFollowAndroidSet: true}); err == nil {
+		t.Fatal("switching to manual without an endpoint bypassed validation")
+	}
+	if !before.Equals(b.Prefs()) {
+		t.Fatal("invalid edit replaced committed configuration")
+	}
+}
+
 func TestLocalDNSFollowPolicyObservation(t *testing.T) {
 	var polc policytest.Config
 	polc.EnableRegisterChangeCallback()

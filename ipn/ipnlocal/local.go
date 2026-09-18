@@ -5468,7 +5468,7 @@ func (b *LocalBackend) editPrefsLocked(actor ipnauth.Actor, mp *ipn.MaskedPrefs)
 	p1.ApplyEdits(mp)
 
 	validationPrefs := p1
-	if !mp.LocalDNSOverrideSet && !mp.LocalDNSResolverSet && p1.LocalDNSOverride {
+	if !mp.LocalDNSOverrideSet && !mp.LocalDNSResolverSet && !mp.LocalDNSFollowAndroidSet && p1.LocalDNSOverride {
 		// A policy-disabled saved choice must not prevent unrelated edits,
 		// particularly disconnecting. Only a new local DNS edit is subject
 		// to the local-override policy rejection; retain the stored choice.
