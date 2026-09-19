@@ -1508,6 +1508,7 @@ func (b *LocalBackend) updateStatusLocked(sb *ipnstate.StatusBuilder) {
 			s.CurrentTailnet.MagicDNSSuffix = nm.MagicDNSSuffix()
 			s.CurrentTailnet.MagicDNSEnabled = nm.DNS.Proxied
 			s.CurrentTailnet.Name = nm.Domain
+			s.CurrentTailnet.StableID = nm.StableTailnetID()
 			if prefs := b.pm.CurrentPrefs(); prefs.Valid() {
 				if !prefs.RouteAll() && nm.AnyPeersAdvertiseRoutes() {
 					s.Health = append(s.Health, healthmsg.WarnAcceptRoutesOff)
@@ -4867,16 +4868,16 @@ func (b *LocalBackend) switchToBestProfileLocked(reason string) {
 		}
 	case !switched:
 		if err != nil {
-			b.logf("%s: an error occurred; staying on profile %q (%s): %v", reason, cp.UserProfile().LoginName, cp.ID(), err)
+			b.logf("%s: an error occurred; staying on profile %q (%s): %v", reason, cp.UserProfile().LoginName(), cp.ID(), err)
 		} else {
-			b.logf("%s: staying on profile %q (%s)", reason, cp.UserProfile().LoginName, cp.ID())
+			b.logf("%s: staying on profile %q (%s)", reason, cp.UserProfile().LoginName(), cp.ID())
 		}
 	case cp.ID() == "":
 		b.logf("%s: disconnecting Tailscale", reason)
 	case background:
-		b.logf("%s: switching to background profile %q (%s)", reason, cp.UserProfile().LoginName, cp.ID())
+		b.logf("%s: switching to background profile %q (%s)", reason, cp.UserProfile().LoginName(), cp.ID())
 	default:
-		b.logf("%s: switching to profile %q (%s)", reason, cp.UserProfile().LoginName, cp.ID())
+		b.logf("%s: switching to profile %q (%s)", reason, cp.UserProfile().LoginName(), cp.ID())
 	}
 	if !switched {
 		return
@@ -8136,7 +8137,7 @@ func (s netLogNodeSource) NodeByAddr(addr netip.Addr) (_ tailcfg.NodeView, _ tai
 // flow logging identity from the current netmap. ok is false if the
 // netmap does not enable network flow logging for this node.
 func (s netLogNodeSource) NetLogIDs() (nodeID, domainID logid.PrivateID, logExitFlows bool, ok bool) {
-	nm := s.b.NetMap()
+	nm := s.b.NetMapNoPeers()
 	if nm == nil || !nm.SelfNode.Valid() {
 		return
 	}
