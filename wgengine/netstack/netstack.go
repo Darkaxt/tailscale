@@ -371,33 +371,28 @@ func Create(logf logger.Logf, tundev *tstun.Wrapper, e wgengine.Engine, mc *magi
 	ns.ctx, ns.ctxCancel = context.WithCancel(context.Background())
 	ns.atomicIsLocalIPFunc.Store(ipset.FalseContainsIPFunc())
 	ns.atomicIsVIPServiceIPFunc.Store(ipset.FalseContainsIPFunc())
-	ns.ipstack = stack.New(stack.Options{
+	opts := stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4, icmp.NewProtocol6},
-	})
-	sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is disabled by default
-	tcpipErr := ns.ipstack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt)
-	if tcpipErr != nil {
-		return nil, fmt.Errorf("could not enable TCP SACK: %v", tcpipErr)
 	}
-	// See https://github.com/tailscale/tailscale/issues/9707
-	// gVisor's RACK performs poorly. ACKs do not appear to be handled in a
-	// timely manner, leading to spurious retransmissions and a reduced
-	// congestion window.
-	tcpRecoveryOpt := tcpip.TCPRecovery(0)
-	tcpipErr = ns.ipstack.SetTransportProtocolOption(tcp.ProtocolNumber, &tcpRecoveryOpt)
-	if tcpipErr != nil {
-		return nil, fmt.Errorf("could not disable TCP RACK: %v", tcpipErr)
+	if runtime.GOOS == "windows" {
+		// Windows monotonic clocks commonly update in 500us steps. RACK's loss
+		// detection compensates for this quantization when configured with an
+		// upper bound on the clock resolution, otherwise timestamp quantization
+		// alone can cause spurious loss declarations and retransmissions.
+		opts.ClockResolution = 500 * time.Microsecond
 	}
-	// gVisor defaults to reno at the time of writing. We explicitly set reno
-	// congestion control in order to prevent unexpected changes. Netstack
-	// has an int overflow in sender congestion window arithmetic that is more
-	// prone to trigger with cubic congestion control.
-	// See https://github.com/google/gvisor/issues/11632
-	renoOpt := tcpip.CongestionControlOption("reno")
-	tcpipErr = ns.ipstack.SetTransportProtocolOption(tcp.ProtocolNumber, &renoOpt)
+	ns.ipstack = stack.New(opts)
+	// CUBIC is the default congestion control on Linux, and is more
+	// appropriate for Tailscale's high-BDP paths than reno. Netstack
+	// previously suffered from an int overflow in CUBIC sender cwnd
+	// arithmetic (https://github.com/google/gvisor/issues/11632), which is
+	// why reno was pinned here; the CUBIC implementation has since been
+	// reworked to use float arithmetic with RFC 9438 target clamping.
+	cubicOpt := tcpip.CongestionControlOption("cubic")
+	tcpipErr := ns.ipstack.SetTransportProtocolOption(tcp.ProtocolNumber, &cubicOpt)
 	if tcpipErr != nil {
-		return nil, fmt.Errorf("could not set reno congestion control: %v", tcpipErr)
+		return nil, fmt.Errorf("could not set cubic congestion control: %v", tcpipErr)
 	}
 	err := setTCPBufSizes(ns.ipstack)
 	if err != nil {
@@ -1767,13 +1762,6 @@ func (ns *Impl) acceptTCP(r *tcp.ForwarderRequest) {
 	}
 }
 
-// tcpCloser is an interface to abstract around various TCPConn types that
-// allow closing of the read and write streams independently of each other.
-type tcpCloser interface {
-	CloseRead() error
-	CloseWrite() error
-}
-
 func (ns *Impl) forwardTCP(getClient func(...tcpip.SettableSocketOption) *gonet.TCPConn, clientRemoteIP netip.Addr, wq *waiter.Queue, dialAddr netip.AddrPort, isLocal bool) (handled bool) {
 	dialAddrStr := dialAddr.String()
 	if debugNetstack() {
@@ -1846,7 +1834,7 @@ func (ns *Impl) forwardTCP(getClient func(...tcpip.SettableSocketOption) *gonet.
 	// from stdDialer.DialContext (which has the requisite functions),
 	// or nil from hangDialer in tests (in which case we would have
 	// errored out by now), so this conversion should always succeed.
-	backendTCPCloser, backendIsTCPCloser := backend.(tcpCloser)
+	backendHalfCloser, backendIsHalfCloser := backend.(nettype.HalfCloser)
 	connClosed := make(chan error, 2)
 	go func() {
 		_, err := io.Copy(backend, client)
@@ -1855,8 +1843,8 @@ func (ns *Impl) forwardTCP(getClient func(...tcpip.SettableSocketOption) *gonet.
 		}
 		connClosed <- err
 		err = nil
-		if backendIsTCPCloser {
-			err = backendTCPCloser.CloseWrite()
+		if backendIsHalfCloser {
+			err = backendHalfCloser.CloseWrite()
 		}
 		err = errors.Join(err, client.CloseRead())
 		if err != nil {
@@ -1870,8 +1858,8 @@ func (ns *Impl) forwardTCP(getClient func(...tcpip.SettableSocketOption) *gonet.
 		}
 		connClosed <- err
 		err = nil
-		if backendIsTCPCloser {
-			err = backendTCPCloser.CloseRead()
+		if backendIsHalfCloser {
+			err = backendHalfCloser.CloseRead()
 		}
 		err = errors.Join(err, client.CloseWrite())
 		if err != nil {
