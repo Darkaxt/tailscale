@@ -17,5 +17,9 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # TailDNS promotes dependency and source updates through its single
+    # reviewed upstream-candidate pipeline; do not recreate inherited PR
+    # branches in this public fork.
+    open-pull-requests-limit: 0
     commit-message:
       prefix: ".github:"
