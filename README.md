@@ -1,4 +1,8 @@
-# Tailscale
+# TailDNS shared core
+
+> **TailDNS fork:** `main` contains the shared DNS implementation used by the [TailDNS Android fork](https://github.com/Darkaxt/TailDNS) and an independently branded Windows command-line frontend. It is not an official Tailscale product. See the [fork summary](FORK.md), [Windows companion guide](docs/taildns-windows.md), and [authoritative specification](https://github.com/Darkaxt/TailDNS/blob/main/docs/local-dns-override/SPECIFICATION.md).
+
+## Upstream Tailscale project
 
 https://tailscale.com
 

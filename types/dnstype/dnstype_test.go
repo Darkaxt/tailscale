@@ -17,7 +17,7 @@ func TestResolverEqual(t *testing.T) {
 		fieldNames = append(fieldNames, field.Name)
 	}
 	sort.Strings(fieldNames)
-	if !slices.Equal(fieldNames, []string{"Addr", "BootstrapResolution", "UseWithExitNode"}) {
+	if !slices.Equal(fieldNames, []string{"Addr", "BootstrapResolution", "LocalBootstrapResolvers", "LocalOverride", "UseWithExitNode"}) {
 		t.Errorf("Resolver fields changed; update test")
 	}
 
@@ -26,6 +26,16 @@ func TestResolverEqual(t *testing.T) {
 		a, b *Resolver
 		want bool
 	}{
+		{
+			name: "not-equal-local-mode",
+			a:    &Resolver{Addr: "dns.example.com", LocalOverride: true},
+			b:    &Resolver{Addr: "dns.example.com"},
+		},
+		{
+			name: "not-equal-local-base-dns",
+			a:    &Resolver{LocalBootstrapResolvers: []netip.Addr{netip.MustParseAddr("192.0.2.53")}},
+			b:    &Resolver{LocalBootstrapResolvers: []netip.Addr{netip.MustParseAddr("192.0.2.54")}},
+		},
 		{
 			name: "nil",
 			a:    nil,

@@ -296,6 +296,18 @@ func (v PrefsView) ExitNodeAllowLANAccess() bool { return v.ж.ExitNodeAllowLANA
 // the "tailscale set --accept-dns=" flag.
 func (v PrefsView) CorpDNS() bool { return v.ж.CorpDNS }
 
+// LocalDNSOverride selects LocalDNSResolver instead of the tailnet's default
+// resolvers. It is local to this profile and does not change specific routes.
+func (v PrefsView) LocalDNSOverride() bool { return v.ж.LocalDNSOverride }
+
+// LocalDNSResolver is retained when the override is disabled. Its path can
+// identify a provider account and must not appear in diagnostic logs.
+func (v PrefsView) LocalDNSResolver() string { return v.ж.LocalDNSResolver }
+
+// LocalDNSFollowAndroid selects the live platform source, retaining the
+// independent manual endpoint above. Never persist a copied system provider.
+func (v PrefsView) LocalDNSFollowAndroid() bool { return v.ж.LocalDNSFollowAndroid }
+
 // RunSSH bool is whether this node should run an SSH
 // server, permitting access to peers according to the
 // policies as configured by the Tailnet's admin(s).
@@ -499,6 +511,9 @@ var _PrefsViewNeedsRegeneration = Prefs(struct {
 	InternalExitNodePrior      tailcfg.StableNodeID
 	ExitNodeAllowLANAccess     bool
 	CorpDNS                    bool
+	LocalDNSOverride           bool
+	LocalDNSResolver           string
+	LocalDNSFollowAndroid      bool
 	RunSSH                     bool
 	RunWebClient               bool
 	WantRunning                bool

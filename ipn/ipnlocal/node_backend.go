@@ -1524,6 +1524,16 @@ func dnsConfigForNetmap(nm *netmap.NetworkMap, peers map[tailcfg.NodeID]tailcfg.
 		return dcfg
 	}
 
+	// Compose after upstream routing, including its exit-node early return.
+	// The config is newly allocated; neither the netmap nor specific routes are
+	// mutated. A root route is another default and must not bypass this choice.
+	if prefs.LocalDNSOverride() && prefs.WantRunning() && !prefs.LoggedOut() {
+		defer func() {
+			dcfg.DefaultResolvers = []*dnstype.Resolver{{Addr: prefs.LocalDNSResolver(), LocalOverride: true}}
+			delete(dcfg.Routes, dnsname.FQDN("."))
+		}()
+	}
+
 	for _, dom := range nm.DNS.Domains {
 		fqdn, err := dnsname.ToFQDN(dom)
 		if err != nil {

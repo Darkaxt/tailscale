@@ -359,6 +359,19 @@ func (m *Manager) compileConfig(cfg Config) (rcfg resolver.Config, ocfg OSConfig
 		// through quad-100.
 		rcfg.Routes = routes
 		rcfg.Routes["."] = cfg.DefaultResolvers
+		for i, selected := range cfg.DefaultResolvers {
+			if !selected.LocalOverride {
+				continue
+			}
+			// Read the platform's base configuration, never the selected
+			// resolver or quad-100. A missing base leaves generic bootstrap
+			// unavailable; known providers still use the maintained IP table.
+			base, _ := m.os.GetBaseConfig()
+			rcfg.Routes["."] = slices.Clone(rcfg.Routes["."])
+			copy := selected.Clone()
+			copy.LocalBootstrapResolvers = slices.Clone(base.Nameservers)
+			rcfg.Routes["."][i] = copy
+		}
 		ocfg.Nameservers = cfg.serviceIPs(m.knobs)
 		return rcfg, ocfg, nil
 	}

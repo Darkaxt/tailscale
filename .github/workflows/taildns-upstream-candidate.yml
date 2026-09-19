@@ -27,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: local-dns-override
+          ref: main
           fetch-depth: 0
       - name: Detect and prepare reviewable core candidate
         env:
@@ -36,7 +36,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          base=local-dns-override
+          base=main
           branch=automation/upstream-core
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
@@ -79,7 +79,7 @@ jobs:
           - Canonical Tailscale core: \`$upstream_head\`
           - Pull-request checks run with read-only repository access and no signing secrets.
 
-          After review and passing checks, merge into \`local-dns-override\`. The Android updater can then propose the exact new module pin. Rollback is closing this pull request and deleting \`$branch\`; the current Android source and public release are unchanged.
+          After review and passing checks, merge into \`main\`. The Android updater can then propose the exact new module pin. Rollback is closing this pull request and deleting \`$branch\`; the current Android source and public release are unchanged.
           EOF
           pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --base "$base" --state open --json number --jq '.[0].number // empty')"
           if [[ -n "$pr" ]]; then
