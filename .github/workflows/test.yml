@@ -840,7 +840,7 @@ jobs:
       # By having the job always run, but skipping its only step as needed, we
       # let the CI output collapse nicely in PRs.
       if: failure() && github.event_name == 'push'
-      uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a # v2.1.1
+      uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
       with:
         webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
         webhook-type: incoming-webhook
@@ -960,7 +960,7 @@ jobs:
         WEBHOOK: ${{ secrets.WINDOWS_SLACK_WEBHOOK_URL }}
       if: env.WEBHOOK != '' && github.event_name == 'pull_request' && needs.windows.result != 'cancelled'
       continue-on-error: true
-      uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a # v2.1.1
+      uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
       with:
         webhook: ${{ env.WEBHOOK }}
         webhook-type: incoming-webhook
