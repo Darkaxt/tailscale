@@ -66,6 +66,17 @@ jobs:
             git merge --abort || true
             exit 1
           fi
+          if ! git diff --quiet "$base_head" HEAD -- .github/workflows; then
+            {
+              echo
+              echo 'Canonical workflow changes omitted from the candidate:'
+              git diff --name-only "$base_head" HEAD -- .github/workflows | sed 's/^/- `/' | sed 's/$/`/'
+              echo
+              echo 'The fork keeps its reviewed workflow policy; runtime source changes remain in the candidate.'
+            } >> "$GITHUB_STEP_SUMMARY"
+            git restore --source="$base_head" --staged --worktree -- .github/workflows
+            git commit -m 'preserve TailDNS workflow policy'
+          fi
           if [[ "$DRY_RUN" == true ]]; then
             echo 'Candidate composed locally; no branch, pull request, tag, release, or signing job was created.' >> "$GITHUB_STEP_SUMMARY"
             exit 0
