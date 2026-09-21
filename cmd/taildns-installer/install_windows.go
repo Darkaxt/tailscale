@@ -1,0 +1,775 @@
+// Copyright (c) Tailscale Inc & contributors
+// SPDX-License-Identifier: BSD-3-Clause
+
+//go:build windows
+
+package main
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/svc"
+	"golang.org/x/sys/windows/svc/mgr"
+)
+
+const (
+	serviceName = "Tailscale"
+	recordName  = "deployment-v3.json"
+)
+
+var replaceFileW = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReplaceFileW")
+
+type installPaths struct {
+	InstallDir  string
+	Daemon      string
+	CLI         string
+	Resolver    string
+	GUI         string
+	Wintun      string
+	State       string
+	ProgramData string
+	Record      string
+}
+
+type statusJSON struct {
+	BackendState string `json:"BackendState"`
+	HaveNodeKey  bool   `json:"HaveNodeKey"`
+	Self         struct {
+		ID           string   `json:"ID"`
+		DNSName      string   `json:"DNSName"`
+		TailscaleIPs []string `json:"TailscaleIPs"`
+		Online       bool     `json:"Online"`
+	} `json:"Self"`
+}
+
+type prefsJSON struct {
+	AutoUpdate struct {
+		Check bool `json:"Check"`
+		Apply bool `json:"Apply"`
+	} `json:"AutoUpdate"`
+}
+
+type versionJSON struct {
+	Short     string `json:"short"`
+	Long      string `json:"long"`
+	GitCommit string `json:"gitCommit"`
+}
+
+func platformInstall(payloadDir string, manifest releaseManifest, dnsEndpoint string) (result installResult, retErr error) {
+	if err := expectedRuntime(); err != nil {
+		return result, err
+	}
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		return result, errors.New("installation requires an elevated Administrator process")
+	}
+
+	manager, service, config, err := openService()
+	if err != nil {
+		return result, err
+	}
+	defer manager.Disconnect()
+	defer service.Close()
+
+	paths, err := resolveInstallPaths(config.BinaryPathName)
+	if err != nil {
+		return result, err
+	}
+	if err := validateInstalledBaseline(paths, manifest.UpstreamVersion); err != nil {
+		return result, err
+	}
+	baseline, err := readIdentity(paths.CLI)
+	if err != nil {
+		return result, err
+	}
+	prefs, err := readPrefs(paths.CLI)
+	if err != nil {
+		return result, err
+	}
+
+	record, err := createDeploymentRecord(paths, config.BinaryPathName, payloadDir, manifest, baseline, prefs)
+	if err != nil {
+		return result, err
+	}
+	if err := writeRecord(paths.Record, record); err != nil {
+		return result, err
+	}
+
+	activationStarted := false
+	defer func() {
+		if retErr == nil || !activationStarted {
+			return
+		}
+		if rollbackErr := restoreRecord(service, paths, record); rollbackErr != nil {
+			retErr = fmt.Errorf("%w; automatic rollback also failed: %v", retErr, rollbackErr)
+			return
+		}
+		if removeErr := os.Remove(paths.Record); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			retErr = fmt.Errorf("%w; original installation was restored but the active deployment record could not be removed: %v", retErr, removeErr)
+			return
+		}
+		result.RolledBack = true
+	}()
+	activationStarted = true
+	if err := setAutoUpdate(paths.CLI, prefs.AutoUpdate.Check, false); err != nil {
+		return result, fmt.Errorf("disabling official automatic updates: %w", err)
+	}
+
+	if err := stopService(service); err != nil {
+		return result, err
+	}
+	for sourceName, destination := range map[string]string{
+		"taildnsd.exe":  paths.Daemon,
+		"tailscale.exe": paths.CLI,
+		"taildns.exe":   paths.Resolver,
+	} {
+		if err := replaceFromPayload(filepath.Join(payloadDir, sourceName), destination); err != nil {
+			return result, err
+		}
+	}
+	if err := startService(service); err != nil {
+		return result, err
+	}
+	if err := waitBackend(paths.CLI); err != nil {
+		return result, err
+	}
+	if err := verifyInstalledVersion(paths, manifest); err != nil {
+		return result, err
+	}
+	after, err := readIdentity(paths.CLI)
+	if err != nil {
+		return result, err
+	}
+	if err := verifyIdentityContinuity(baseline, after); err != nil {
+		return result, err
+	}
+	if err := verifyPreservedComponents(paths, record.PreservedComponentHash); err != nil {
+		return result, err
+	}
+	if dnsEndpoint != "" {
+		if err := setResolver(paths.Resolver, dnsEndpoint); err != nil {
+			return result, err
+		}
+	}
+	if err := verifyDNS(after); err != nil {
+		return result, err
+	}
+
+	return installResult{
+		Action:             "installed",
+		Version:            manifest.version(),
+		ServicePath:        config.BinaryPathName,
+		Identity:           after,
+		ResolverConfigured: dnsEndpoint != "",
+	}, nil
+}
+
+func platformRollback() (installResult, error) {
+	if err := expectedRuntime(); err != nil {
+		return installResult{}, err
+	}
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		return installResult{}, errors.New("rollback requires an elevated Administrator process")
+	}
+	manager, service, config, err := openService()
+	if err != nil {
+		return installResult{}, err
+	}
+	defer manager.Disconnect()
+	defer service.Close()
+	paths, err := resolveInstallPaths(config.BinaryPathName)
+	if err != nil {
+		return installResult{}, err
+	}
+	record, err := readRecord(paths.Record)
+	if err != nil {
+		return installResult{}, err
+	}
+	if config.BinaryPathName != record.ServicePath {
+		return installResult{}, errors.New("service image path differs from the deployment record")
+	}
+	if err := restoreRecord(service, paths, record); err != nil {
+		return installResult{}, err
+	}
+	after, err := readIdentity(paths.CLI)
+	if err != nil {
+		return installResult{}, err
+	}
+	if err := verifyIdentityContinuity(record.BaselineIdentity, after); err != nil {
+		return installResult{}, err
+	}
+	if err := os.Remove(paths.Record); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return installResult{}, fmt.Errorf("removing active deployment record after rollback: %w", err)
+	}
+	return installResult{Action: "rolledBack", Version: record.Version, ServicePath: record.ServicePath, Identity: after, RolledBack: true}, nil
+}
+
+func platformStatus() (installResult, error) {
+	manager, service, config, err := openService()
+	if err != nil {
+		return installResult{}, err
+	}
+	defer manager.Disconnect()
+	defer service.Close()
+	paths, err := resolveInstallPaths(config.BinaryPathName)
+	if err != nil {
+		return installResult{}, err
+	}
+	record, err := readRecord(paths.Record)
+	if err != nil {
+		return installResult{}, err
+	}
+	identity, err := readIdentity(paths.CLI)
+	if err != nil {
+		return installResult{}, err
+	}
+	if err := verifyIdentityContinuity(record.BaselineIdentity, identity); err != nil {
+		return installResult{}, err
+	}
+	for name, file := range record.Files {
+		if got, err := hashFile(file.Path); err != nil || !strings.EqualFold(got, file.InstalledHash) {
+			return installResult{}, fmt.Errorf("installed %s does not match deployment record", name)
+		}
+	}
+	if err := verifyPreservedComponents(paths, record.PreservedComponentHash); err != nil {
+		return installResult{}, err
+	}
+	manifest := releaseManifest{UpstreamVersion: record.UpstreamVersion, Sequence: record.Sequence, CoreCommit: record.CoreCommit}
+	if err := verifyInstalledVersion(paths, manifest); err != nil {
+		return installResult{}, err
+	}
+	return installResult{Action: "status", Version: record.Version, ServicePath: record.ServicePath, Identity: identity}, nil
+}
+
+func openService() (*mgr.Mgr, *mgr.Service, mgr.Config, error) {
+	manager, err := mgr.Connect()
+	if err != nil {
+		return nil, nil, mgr.Config{}, fmt.Errorf("connecting to Service Control Manager: %w", err)
+	}
+	service, err := manager.OpenService(serviceName)
+	if err != nil {
+		manager.Disconnect()
+		return nil, nil, mgr.Config{}, fmt.Errorf("opening %s service: %w", serviceName, err)
+	}
+	config, err := service.Config()
+	if err != nil {
+		service.Close()
+		manager.Disconnect()
+		return nil, nil, mgr.Config{}, fmt.Errorf("reading %s service configuration: %w", serviceName, err)
+	}
+	return manager, service, config, nil
+}
+
+func resolveInstallPaths(servicePath string) (installPaths, error) {
+	programData := os.Getenv("ProgramData")
+	if programData == "" {
+		return installPaths{}, errors.New("ProgramData is unavailable")
+	}
+	executable, err := executableFromServicePath(servicePath)
+	if err != nil {
+		return installPaths{}, err
+	}
+	if !strings.EqualFold(filepath.Base(executable), "tailscaled.exe") {
+		return installPaths{}, fmt.Errorf("unexpected Tailscale service executable %q", executable)
+	}
+	dir := filepath.Dir(executable)
+	return installPaths{
+		InstallDir:  dir,
+		Daemon:      executable,
+		CLI:         filepath.Join(dir, "tailscale.exe"),
+		Resolver:    filepath.Join(dir, "taildns.exe"),
+		GUI:         filepath.Join(dir, "tailscale-ipn.exe"),
+		Wintun:      filepath.Join(dir, "wintun.dll"),
+		State:       filepath.Join(programData, "Tailscale", "server-state.conf"),
+		ProgramData: filepath.Join(programData, "TailDNS"),
+		Record:      filepath.Join(programData, "TailDNS", recordName),
+	}, nil
+}
+
+func executableFromServicePath(servicePath string) (string, error) {
+	trimmed := strings.TrimSpace(servicePath)
+	if strings.HasPrefix(trimmed, `"`) {
+		end := strings.Index(trimmed[1:], `"`)
+		if end < 0 {
+			return "", errors.New("unterminated quoted service path")
+		}
+		return trimmed[1 : end+1], nil
+	}
+	if index := strings.IndexAny(trimmed, " \t"); index >= 0 {
+		trimmed = trimmed[:index]
+	}
+	if trimmed == "" {
+		return "", errors.New("empty service path")
+	}
+	return trimmed, nil
+}
+
+func validateInstalledBaseline(paths installPaths, upstreamVersion string) error {
+	for _, required := range []string{paths.Daemon, paths.CLI, paths.GUI, paths.Wintun, paths.State} {
+		info, err := os.Stat(required)
+		if err != nil || !info.Mode().IsRegular() {
+			return fmt.Errorf("required existing installation file is unavailable: %s", required)
+		}
+	}
+	var version versionJSON
+	if err := commandJSON(paths.CLI, &version, "version", "--json"); err != nil {
+		return err
+	}
+	if version.Short != upstreamVersion {
+		return fmt.Errorf("installed Tailscale %s does not match release base %s", version.Short, upstreamVersion)
+	}
+	if strings.Contains(version.Long, "-taildns.") {
+		return errors.New("an unmanaged TailDNS overlay is already installed; restore the official baseline before first managed installation")
+	}
+	if _, err := os.Stat(paths.Record); err == nil {
+		return errors.New("this installation is already managed by TailDNS; use the TailDNS updater for subsequent releases")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("checking existing TailDNS deployment record: %w", err)
+	}
+	return nil
+}
+
+func createDeploymentRecord(paths installPaths, servicePath, payloadDir string, manifest releaseManifest, baseline machineIdentity, prefs prefsJSON) (deploymentRecord, error) {
+	recovery := filepath.Join(paths.ProgramData, "rollback", manifest.version())
+	if err := os.MkdirAll(recovery, 0o700); err != nil {
+		return deploymentRecord{}, err
+	}
+	record := deploymentRecord{
+		SchemaVersion:          3,
+		InstalledAtUTC:         time.Now().UTC().Format(time.RFC3339Nano),
+		Version:                manifest.version(),
+		UpstreamVersion:        manifest.UpstreamVersion,
+		Sequence:               manifest.Sequence,
+		CoreCommit:             manifest.CoreCommit,
+		ServicePath:            servicePath,
+		Files:                  map[string]fileRecord{},
+		PreservedComponentHash: map[string]string{},
+		OriginalUpdateCheck:    prefs.AutoUpdate.Check,
+		OriginalUpdateApply:    prefs.AutoUpdate.Apply,
+		BaselineIdentity:       baseline,
+	}
+	for source, destination := range map[string]string{
+		"taildnsd.exe":  paths.Daemon,
+		"tailscale.exe": paths.CLI,
+		"taildns.exe":   paths.Resolver,
+	} {
+		installedHash, err := hashFile(filepath.Join(payloadDir, source))
+		if err != nil {
+			return deploymentRecord{}, err
+		}
+		file := fileRecord{Path: destination, InstalledHash: installedHash}
+		if info, err := os.Stat(destination); err == nil && info.Mode().IsRegular() {
+			file.Existed = true
+			file.OriginalHash, err = hashFile(destination)
+			if err != nil {
+				return deploymentRecord{}, err
+			}
+			file.OriginalPath = filepath.Join(recovery, filepath.Base(destination))
+			if err := copyVerified(destination, file.OriginalPath, file.OriginalHash); err != nil {
+				return deploymentRecord{}, err
+			}
+		}
+		record.Files[source] = file
+	}
+	for name, path := range map[string]string{"tailscale-ipn.exe": paths.GUI, "wintun.dll": paths.Wintun} {
+		hash, err := hashFile(path)
+		if err != nil {
+			return deploymentRecord{}, err
+		}
+		record.PreservedComponentHash[name] = hash
+	}
+	return record, nil
+}
+
+func restoreRecord(service *mgr.Service, paths installPaths, record deploymentRecord) error {
+	if err := stopService(service); err != nil {
+		return err
+	}
+	for name, file := range record.Files {
+		if file.Existed {
+			if got, err := hashFile(file.OriginalPath); err != nil || !strings.EqualFold(got, file.OriginalHash) {
+				return fmt.Errorf("original %s backup is unavailable or corrupt", name)
+			}
+			if err := replaceFromPayload(file.OriginalPath, file.Path); err != nil {
+				return err
+			}
+		} else if err := removeKnownInstalled(file); err != nil {
+			return err
+		}
+	}
+	if err := startService(service); err != nil {
+		return err
+	}
+	if err := waitBackend(paths.CLI); err != nil {
+		return err
+	}
+	return setAutoUpdate(paths.CLI, record.OriginalUpdateCheck, record.OriginalUpdateApply)
+}
+
+func removeKnownInstalled(file fileRecord) error {
+	hash, err := hashFile(file.Path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(hash, file.InstalledHash) {
+		return fmt.Errorf("refusing to remove changed task-owned file %s", file.Path)
+	}
+	return os.Remove(file.Path)
+}
+
+func stopService(service *mgr.Service) error {
+	status, err := service.Query()
+	if err != nil {
+		return err
+	}
+	if status.State == svc.Stopped {
+		return nil
+	}
+	if _, err := service.Control(svc.Stop); err != nil && status.State != svc.StopPending {
+		return fmt.Errorf("stopping Tailscale service: %w", err)
+	}
+	return waitServiceState(service, svc.Stopped)
+}
+
+func startService(service *mgr.Service) error {
+	status, err := service.Query()
+	if err != nil {
+		return err
+	}
+	if status.State == svc.Running {
+		return nil
+	}
+	if err := service.Start(); err != nil && status.State != svc.StartPending {
+		return fmt.Errorf("starting Tailscale service: %w", err)
+	}
+	return waitServiceState(service, svc.Running)
+}
+
+func waitServiceState(service *mgr.Service, wanted svc.State) error {
+	var lastCheckpoint uint32
+	for {
+		status, err := service.Query()
+		if err != nil {
+			return err
+		}
+		if status.State == wanted {
+			return nil
+		}
+		if status.State == svc.Stopped && wanted != svc.Stopped {
+			return fmt.Errorf("Tailscale service stopped with code %d", status.Win32ExitCode)
+		}
+		wait := time.Duration(status.WaitHint/10) * time.Millisecond
+		if wait < 100*time.Millisecond {
+			wait = 100 * time.Millisecond
+		}
+		if wait > 2*time.Second {
+			wait = 2 * time.Second
+		}
+		if status.CheckPoint != 0 {
+			lastCheckpoint = status.CheckPoint
+		}
+		_ = lastCheckpoint
+		time.Sleep(wait)
+	}
+}
+
+func replaceFromPayload(source, destination string) error {
+	staged := destination + ".taildns-staged"
+	if err := copyFile(source, staged); err != nil {
+		return err
+	}
+	if info, err := os.Stat(destination); err == nil && info.Mode().IsRegular() {
+		if err := replaceFile(staged, destination); err != nil {
+			_ = os.Remove(staged)
+			return err
+		}
+		return nil
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		_ = os.Remove(staged)
+		return err
+	}
+	return moveFile(staged, destination)
+}
+
+func replaceFile(source, destination string) error {
+	dst, err := windows.UTF16PtrFromString(destination)
+	if err != nil {
+		return err
+	}
+	src, err := windows.UTF16PtrFromString(source)
+	if err != nil {
+		return err
+	}
+	r1, _, callErr := replaceFileW.Call(uintptr(unsafe.Pointer(dst)), uintptr(unsafe.Pointer(src)), 0, 1, 0, 0)
+	if r1 == 0 {
+		return fmt.Errorf("atomically replacing %s: %w", destination, callErr)
+	}
+	return nil
+}
+
+func moveFile(source, destination string) error {
+	src, err := windows.UTF16PtrFromString(source)
+	if err != nil {
+		return err
+	}
+	dst, err := windows.UTF16PtrFromString(destination)
+	if err != nil {
+		return err
+	}
+	return windows.MoveFileEx(src, dst, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
+}
+
+func copyVerified(source, destination, expectedHash string) error {
+	if got, err := hashFile(destination); err == nil && strings.EqualFold(got, expectedHash) {
+		return nil
+	}
+	if err := copyFile(source, destination); err != nil {
+		return err
+	}
+	got, err := hashFile(destination)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(got, expectedHash) {
+		return fmt.Errorf("backup hash mismatch for %s", destination)
+	}
+	return nil
+}
+
+func copyFile(source, destination string) error {
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+		return err
+	}
+	out, err := os.OpenFile(destination, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, in)
+	syncErr := out.Sync()
+	closeErr := out.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if syncErr != nil {
+		return syncErr
+	}
+	return closeErr
+}
+
+func hashFile(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func writeRecord(path string, record deploymentRecord) error {
+	raw, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return err
+	}
+	if containsFold(string(raw), "PrivateNodeKey") || containsFold(string(raw), "NetworkLockKey") || containsFold(string(raw), "server-state") {
+		return errors.New("deployment record contains prohibited private-state material")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	staged := path + ".new"
+	if err := os.WriteFile(staged, append(raw, '\n'), 0o600); err != nil {
+		return err
+	}
+	return moveFile(staged, path)
+}
+
+func readRecord(path string) (deploymentRecord, error) {
+	var record deploymentRecord
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return record, fmt.Errorf("reading deployment record: %w", err)
+	}
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&record); err != nil {
+		return record, err
+	}
+	if record.SchemaVersion != 3 || record.ServicePath == "" || len(record.Files) != 3 {
+		return record, errors.New("unsupported or incomplete deployment record")
+	}
+	return record, nil
+}
+
+func commandJSON(cli string, target any, args ...string) error {
+	output, err := exec.Command(cli, args...).Output()
+	if err != nil {
+		return fmt.Errorf("running %s %s: %w", cli, strings.Join(args, " "), err)
+	}
+	if err := json.Unmarshal(output, target); err != nil {
+		return fmt.Errorf("parsing %s %s output: %w", cli, strings.Join(args, " "), err)
+	}
+	return nil
+}
+
+func readPrefs(cli string) (prefsJSON, error) {
+	var prefs prefsJSON
+	err := commandJSON(cli, &prefs, "debug", "prefs")
+	return prefs, err
+}
+
+var lockKeyRE = regexp.MustCompile(`This node's tailnet-lock key:\s*(tlpub:[0-9a-f]+)`)
+
+func readIdentity(cli string) (machineIdentity, error) {
+	var status statusJSON
+	if err := commandJSON(cli, &status, "status", "--json"); err != nil {
+		return machineIdentity{}, err
+	}
+	if status.BackendState != "Running" || !status.HaveNodeKey || !status.Self.Online || status.Self.ID == "" || status.Self.DNSName == "" {
+		return machineIdentity{}, errors.New("Tailscale backend is not authenticated and running")
+	}
+	output, err := exec.Command(cli, "lock", "status").CombinedOutput()
+	if err != nil {
+		return machineIdentity{}, fmt.Errorf("reading Tailnet Lock status: %w", err)
+	}
+	if !bytesContains(output, []byte("Tailnet Lock is ENABLED")) || !bytesContains(output, []byte("This node is accessible under Tailnet Lock")) {
+		return machineIdentity{}, errors.New("node is not accessible under Tailnet Lock")
+	}
+	match := lockKeyRE.FindSubmatch(output)
+	if len(match) != 2 {
+		return machineIdentity{}, errors.New("Tailnet Lock signing-key identity is unavailable")
+	}
+	return machineIdentity{NodeID: status.Self.ID, TailscaleIPs: status.Self.TailscaleIPs, TailnetLockKey: string(match[1]), DNSName: status.Self.DNSName}, nil
+}
+
+func bytesContains(haystack, needle []byte) bool {
+	return strings.Contains(string(haystack), string(needle))
+}
+
+func setAutoUpdate(cli string, check, apply bool) error {
+	cmd := exec.Command(cli, "set", fmt.Sprintf("--update-check=%t", check), fmt.Sprintf("--auto-update=%t", apply))
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("updating automatic-update preferences: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func waitBackend(cli string) error {
+	cmd := exec.Command(cli, "wait", "--timeout=0s")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("waiting for Tailscale backend: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func verifyInstalledVersion(paths installPaths, manifest releaseManifest) error {
+	var version versionJSON
+	if err := commandJSON(paths.CLI, &version, "version", "--json"); err != nil {
+		return err
+	}
+	expectedLong := fmt.Sprintf("%s-taildns.%d", manifest.UpstreamVersion, manifest.Sequence)
+	if version.Short != manifest.UpstreamVersion || version.Long != expectedLong || version.GitCommit != manifest.CoreCommit {
+		return fmt.Errorf("installed CLI reports incompatible version %q (%q)", version.Short, version.Long)
+	}
+	output, err := exec.Command(paths.Daemon, "--version").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("reading installed daemon version: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	daemonVersion := string(output)
+	for _, required := range []string{
+		expectedLong,
+		"tailscale commit: " + manifest.CoreCommit,
+		"long version: " + expectedLong,
+	} {
+		if !strings.Contains(daemonVersion, required) {
+			return fmt.Errorf("installed daemon version does not contain %q", required)
+		}
+	}
+	return nil
+}
+
+func verifyPreservedComponents(paths installPaths, expected map[string]string) error {
+	for name, path := range map[string]string{"tailscale-ipn.exe": paths.GUI, "wintun.dll": paths.Wintun} {
+		actual, err := hashFile(path)
+		if err != nil {
+			return err
+		}
+		if !strings.EqualFold(actual, expected[name]) {
+			return fmt.Errorf("preserved component %s changed", name)
+		}
+	}
+	return nil
+}
+
+func setResolver(resolver, endpoint string) error {
+	if !strings.HasPrefix(endpoint, "https://") {
+		return errors.New("DNS endpoint must be an HTTPS URL")
+	}
+	if output, err := exec.Command(resolver, "set", endpoint).CombinedOutput(); err != nil {
+		return fmt.Errorf("configuring TailDNS resolver: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	var status struct {
+		Configured bool   `json:"Configured"`
+		Applied    bool   `json:"Applied"`
+		Endpoint   string `json:"Endpoint"`
+		Reason     string `json:"Reason"`
+	}
+	if err := commandJSON(resolver, &status, "--json", "status"); err != nil {
+		return err
+	}
+	if !status.Configured || !status.Applied || status.Endpoint != endpoint {
+		return fmt.Errorf("resolver was not confirmed applied: %s", status.Reason)
+	}
+	return nil
+}
+
+func verifyDNS(identity machineIdentity) error {
+	public, err := net.DefaultResolver.LookupHost(context.Background(), "example.com")
+	if err != nil || len(public) == 0 {
+		return fmt.Errorf("public DNS verification failed: %w", err)
+	}
+	if identity.DNSName == "" || len(identity.TailscaleIPs) == 0 {
+		return errors.New("MagicDNS verification has no expected name or tailnet address")
+	}
+	magic, err := net.DefaultResolver.LookupHost(context.Background(), strings.TrimSuffix(identity.DNSName, "."))
+	if err != nil || len(magic) == 0 {
+		return fmt.Errorf("MagicDNS verification failed for %s: %w", identity.DNSName, err)
+	}
+	expected := make(map[string]bool, len(identity.TailscaleIPs))
+	for _, address := range identity.TailscaleIPs {
+		if parsed := net.ParseIP(address); parsed != nil {
+			expected[parsed.String()] = true
+		}
+	}
+	for _, address := range magic {
+		if parsed := net.ParseIP(address); parsed != nil && expected[parsed.String()] {
+			return nil
+		}
+	}
+	return fmt.Errorf("MagicDNS answer for %s does not contain a preserved tailnet address", identity.DNSName)
+}

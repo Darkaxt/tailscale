@@ -1,0 +1,204 @@
+name: TailDNS Windows release
+
+on:
+  push:
+    tags:
+      - 'windows-v*\+*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: taildns-windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository_owner == 'Darkaxt'
+    runs-on: windows-latest
+    env:
+      UPDATE_PUBLIC_KEY: ${{ vars.TAILDNS_WINDOWS_UPDATE_PUBLIC_KEY_BASE64 }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Validate immutable release identity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REF_NAME -notmatch '^windows-v([0-9]+\.[0-9]+\.[0-9]+)\+([1-9][0-9]*)$') {
+            throw "Invalid TailDNS Windows tag: $env:GITHUB_REF_NAME"
+          }
+          $upstream = $Matches[1]
+          $sequence = [uint64]$Matches[2]
+          $sourceVersion = (Get-Content -LiteralPath VERSION.txt -Raw).Trim()
+          if ($sourceVersion -ne $upstream) {
+            throw "Tag base $upstream does not match source version $sourceVersion"
+          }
+          $publicKey = [Convert]::FromBase64String($env:UPDATE_PUBLIC_KEY)
+          if ($publicKey.Length -ne 32) {
+            throw 'TAILDNS_WINDOWS_UPDATE_PUBLIC_KEY_BASE64 must be one Ed25519 public key'
+          }
+          "UPSTREAM_VERSION=$upstream" >> $env:GITHUB_ENV
+          "RELEASE_SEQUENCE=$sequence" >> $env:GITHUB_ENV
+          "LONG_VERSION=$upstream-taildns.$sequence" >> $env:GITHUB_ENV
+      - name: Test installer trust and transaction logic
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\tool\go.exe test ./cmd/taildns-installer -count=1
+      - name: Build exact-version Windows payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $output = Join-Path $env:RUNNER_TEMP 'taildns-windows-amd64'
+          New-Item -ItemType Directory -Path $output | Out-Null
+          $versionFlags = "-X tailscale.com/version.longStamp=$env:LONG_VERSION -X tailscale.com/version.shortStamp=$env:UPSTREAM_VERSION -X tailscale.com/version.gitCommitStamp=$env:GITHUB_SHA"
+          & .\tool\go.exe run ./cmd/mkmanifest amd64 cmd/taildns-installer/windows-manifest.xml cmd/taildns-installer/manifest_windows_amd64.syso
+          try {
+            & .\tool\go.exe build -trimpath -ldflags $versionFlags -o (Join-Path $output 'taildnsd.exe') ./cmd/tailscaled
+            & .\tool\go.exe build -trimpath -ldflags $versionFlags -o (Join-Path $output 'tailscale.exe') ./cmd/tailscale
+            & .\tool\go.exe build -trimpath -ldflags $versionFlags -o (Join-Path $output 'taildns.exe') ./cmd/taildns
+            $installerFlags = "$versionFlags -X main.updatePublicKeyBase64=$env:UPDATE_PUBLIC_KEY"
+            & .\tool\go.exe build -trimpath -ldflags $installerFlags -o (Join-Path $output 'taildns-installer.exe') ./cmd/taildns-installer
+          } finally {
+            Remove-Item -LiteralPath cmd/taildns-installer/manifest_windows_amd64.syso -ErrorAction SilentlyContinue
+          }
+          $version = & (Join-Path $output 'tailscale.exe') version --json | ConvertFrom-Json
+          if ($version.short -ne $env:UPSTREAM_VERSION -or $version.long -ne $env:LONG_VERSION) {
+            throw "Unexpected CLI version: $($version | ConvertTo-Json -Compress)"
+          }
+          $daemonVersion = (& (Join-Path $output 'taildnsd.exe') --version | Select-Object -First 1).Trim()
+          if ($daemonVersion -ne $env:LONG_VERSION) {
+            throw "Unexpected daemon version: $daemonVersion"
+          }
+          $installerBytes = [IO.File]::ReadAllBytes((Join-Path $output 'taildns-installer.exe'))
+          $installerText = [Text.Encoding]::ASCII.GetString($installerBytes)
+          if (-not $installerText.Contains('requireAdministrator')) {
+            throw 'Installer does not contain the required UAC execution level'
+          }
+          if (-not $installerText.Contains($env:UPDATE_PUBLIC_KEY)) {
+            throw 'Installer does not contain the configured update public key'
+          }
+          Copy-Item -LiteralPath docs/taildns-windows.md -Destination (Join-Path $output 'README.md')
+          Copy-Item -LiteralPath LICENSE -Destination (Join-Path $output 'TAILSCALE-CORE-LICENSE.txt')
+      - name: Create unsigned deterministic manifest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $output = Join-Path $env:RUNNER_TEMP 'taildns-windows-amd64'
+          $files = foreach ($name in @('taildnsd.exe', 'tailscale.exe', 'taildns.exe', 'taildns-installer.exe')) {
+            $path = Join-Path $output $name
+            [ordered]@{
+              name = $name
+              sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+              size = (Get-Item -LiteralPath $path).Length
+            }
+          }
+          $manifest = [ordered]@{
+            schemaVersion = 1
+            product = 'TailDNS'
+            upstreamVersion = $env:UPSTREAM_VERSION
+            sequence = [uint64]$env:RELEASE_SEQUENCE
+            platform = 'windows'
+            arch = 'amd64'
+            coreCommit = $env:GITHUB_SHA
+            files = @($files)
+          }
+          $json = $manifest | ConvertTo-Json -Depth 4
+          [IO.File]::WriteAllText((Join-Path $output 'taildns-windows-update.json'), $json + "`n", [Text.UTF8Encoding]::new($false))
+      - uses: actions/upload-artifact@v4
+        with:
+          name: taildns-windows-unsigned
+          path: ${{ runner.temp }}/taildns-windows-amd64/
+          if-no-files-found: error
+          retention-days: 1
+
+  sign-and-publish:
+    needs: build
+    if: github.repository_owner == 'Darkaxt'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      UPDATE_PRIVATE_KEY: ${{ secrets.TAILDNS_WINDOWS_UPDATE_PRIVATE_KEY_PEM }}
+      UPDATE_PUBLIC_KEY: ${{ vars.TAILDNS_WINDOWS_UPDATE_PUBLIC_KEY_BASE64 }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: taildns-windows-unsigned
+          path: candidate
+      - name: Sign and independently verify update manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$UPDATE_PRIVATE_KEY"
+          test -n "$UPDATE_PUBLIC_KEY"
+          for required in taildnsd.exe tailscale.exe taildns.exe taildns-installer.exe taildns-windows-update.json README.md TAILSCALE-CORE-LICENSE.txt; do
+            test -f "candidate/$required"
+          done
+          if find candidate -type l | grep -q .; then
+            echo 'Refusing symbolic links in the release payload' >&2
+            exit 1
+          fi
+          diff -u \
+            <(printf '%s\n' README.md TAILSCALE-CORE-LICENSE.txt taildns-installer.exe taildns-windows-update.json taildns.exe taildnsd.exe tailscale.exe) \
+            <(find candidate -maxdepth 1 -type f -printf '%f\n' | sort)
+          if [[ "$GITHUB_REF_NAME" =~ ^windows-v([0-9]+\.[0-9]+\.[0-9]+)\+([1-9][0-9]*)$ ]]; then
+            upstream="${BASH_REMATCH[1]}"
+            sequence="${BASH_REMATCH[2]}"
+          else
+            echo "Invalid release tag: $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          test "$(jq -r '.schemaVersion' candidate/taildns-windows-update.json)" = 1
+          test "$(jq -r '.product' candidate/taildns-windows-update.json)" = TailDNS
+          test "$(jq -r '.upstreamVersion' candidate/taildns-windows-update.json)" = "$upstream"
+          test "$(jq -r '.sequence' candidate/taildns-windows-update.json)" = "$sequence"
+          test "$(jq -r '.platform' candidate/taildns-windows-update.json)" = windows
+          test "$(jq -r '.arch' candidate/taildns-windows-update.json)" = amd64
+          test "$(jq -r '.coreCommit' candidate/taildns-windows-update.json)" = "$GITHUB_SHA"
+          test "$(jq '.files | length' candidate/taildns-windows-update.json)" = 4
+          diff -u \
+            <(printf '%s\n' taildns-installer.exe taildns.exe taildnsd.exe tailscale.exe) \
+            <(jq -r '.files[].name' candidate/taildns-windows-update.json | sort)
+          for payload in taildnsd.exe tailscale.exe taildns.exe taildns-installer.exe; do
+            expected_hash="$(jq -r --arg name "$payload" '.files[] | select(.name == $name) | .sha256' candidate/taildns-windows-update.json)"
+            expected_size="$(jq -r --arg name "$payload" '.files[] | select(.name == $name) | .size' candidate/taildns-windows-update.json)"
+            test "$(sha256sum "candidate/$payload" | cut -d' ' -f1)" = "$expected_hash"
+            test "$(stat -c '%s' "candidate/$payload")" = "$expected_size"
+          done
+          umask 077
+          key="$RUNNER_TEMP/taildns-update-key.pem"
+          printf '%s' "$UPDATE_PRIVATE_KEY" > "$key"
+          actual_public="$(openssl pkey -in "$key" -pubout -outform DER | tail -c 32 | base64 -w0)"
+          test "$actual_public" = "$UPDATE_PUBLIC_KEY"
+          openssl pkeyutl -sign -rawin -inkey "$key" -in candidate/taildns-windows-update.json -out "$RUNNER_TEMP/manifest.sig"
+          base64 -w0 "$RUNNER_TEMP/manifest.sig" > candidate/taildns-windows-update.json.sig
+          printf '\n' >> candidate/taildns-windows-update.json.sig
+          openssl pkey -in "$key" -pubout -out "$RUNNER_TEMP/public.pem"
+          openssl pkeyutl -verify -rawin -pubin -inkey "$RUNNER_TEMP/public.pem" -in candidate/taildns-windows-update.json -sigfile "$RUNNER_TEMP/manifest.sig"
+          rm -f "$key" "$RUNNER_TEMP/manifest.sig" "$RUNNER_TEMP/public.pem"
+      - name: Package and publish immutable release
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release
+          (cd candidate && zip -9 -r ../release/taildns-windows-amd64.zip .)
+          cp candidate/taildns-windows-update.json candidate/taildns-windows-update.json.sig release/
+          (cd release && sha256sum taildns-windows-amd64.zip taildns-windows-update.json taildns-windows-update.json.sig > SHA256SUMS)
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists" >&2
+            exit 1
+          fi
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          TailDNS Windows overlay for official Tailscale ${GITHUB_REF_NAME#windows-v}.
+
+          The native installer preserves the official proprietary GUI, Wintun driver, node identity, login, Tailnet Lock identity, service registration, and state. It replaces only the exact-version open-source daemon and CLI and installs the TailDNS resolver. Failed activation rolls back to verified originals.
+
+          The official Tailscale updater remains disabled while this overlay is installed. TailDNS update metadata is authenticated by the separately managed Ed25519 manifest signature; this is not Authenticode code signing.
+          EOF
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "TailDNS Windows ${GITHUB_REF_NAME#windows-v}" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"
