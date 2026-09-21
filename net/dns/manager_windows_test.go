@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"math/rand"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -81,6 +83,74 @@ func TestHostFileChanged(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Errorf("got %q, want %q\n", got, want)
+	}
+}
+
+func TestSetHostsFileReadOnlyIsPreserved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hosts")
+	original := []byte("127.0.0.1 localhost\r\n")
+	if err := os.WriteFile(path, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs []string
+	logf := func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+	err := setHostsFile(logf, path, []*HostEntry{{
+		Addr:  netip.MustParseAddr("100.64.0.1"),
+		Hosts: []string{"peer.example.ts.net.", "peer"},
+	}})
+	if err != nil {
+		t.Fatalf("setHostsFile on read-only file: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("read-only hosts file changed: got %q, want %q", got, original)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o200 != 0 {
+		t.Fatalf("read-only hosts file became writable: mode %v", info.Mode())
+	}
+	if joined := strings.Join(logs, "\n"); !strings.Contains(joined, "read-only") {
+		t.Fatalf("logs %q do not explain why hosts projection was skipped", joined)
+	}
+}
+
+func TestSetHostsFileWritableStillUpdates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hosts")
+	if err := os.WriteFile(path, []byte("127.0.0.1 localhost\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := setHostsFile(logger.Discard, path, []*HostEntry{{
+		Addr:  netip.MustParseAddr("100.64.0.1"),
+		Hosts: []string{"peer.example.ts.net.", "peer"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(got, []byte("100.64.0.1 peer.example.ts.net. peer")) {
+		t.Fatalf("writable hosts file was not updated: %q", got)
+	}
+}
+
+func TestSetHostsFileOtherReadFailureRemainsFatal(t *testing.T) {
+	err := setHostsFile(logger.Discard, t.TempDir(), nil)
+	if err == nil {
+		t.Fatal("setHostsFile on a directory unexpectedly succeeded")
 	}
 }
 

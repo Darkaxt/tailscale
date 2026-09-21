@@ -273,23 +273,38 @@ func (m *windowsManager) setHosts(hosts []*HostEntry) error {
 		return err
 	}
 	hostsFile := filepath.Join(systemDir, "drivers", "etc", "hosts")
+	return setHostsFile(m.logf, hostsFile, hosts)
+}
+
+func setHostsFile(logf logger.Logf, hostsFile string, hosts []*HostEntry) error {
 	b, err := os.ReadFile(hostsFile)
+	fileExists := err == nil
 	switch {
 	case err == nil:
 		// Continue.
 	case errors.Is(err, fs.ErrNotExist):
 		// Non-fatal, we'll just create a new hosts file.
-		m.logf("failed to read the hosts file: %v", err)
+		logf("failed to read the hosts file: %v", err)
 	default:
 		return err
 	}
-	outB, err := setTailscaleHosts(m.logf, b, hosts)
+	outB, err := setTailscaleHosts(logf, b, hosts)
 	if err != nil {
 		return err
 	}
 	if outB == nil {
 		// No change to hosts file, therefore no write necessary.
 		return nil
+	}
+	if fileExists {
+		info, err := os.Stat(hostsFile)
+		if err != nil {
+			return err
+		}
+		if info.Mode().Perm()&0200 == 0 {
+			logf("skipping Tailscale hosts projection because %s is read-only", hostsFile)
+			return nil
+		}
 	}
 
 	const fileMode = 0 // ignored on windows.
