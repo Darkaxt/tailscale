@@ -66,9 +66,10 @@ jobs:
           if ($version.short -ne $env:UPSTREAM_VERSION -or $version.long -ne $env:LONG_VERSION) {
             throw "Unexpected CLI version: $($version | ConvertTo-Json -Compress)"
           }
-          $daemonVersion = (& (Join-Path $output 'taildnsd.exe') --version | Select-Object -First 1).Trim()
-          if ($daemonVersion -ne $env:LONG_VERSION) {
-            throw "Unexpected daemon version: $daemonVersion"
+          $daemonVersion = @(& (Join-Path $output 'taildnsd.exe') --version)
+          if ($daemonVersion -notcontains "  tailscale commit: $env:GITHUB_SHA" -or
+              $daemonVersion -notcontains "  long version: $env:LONG_VERSION") {
+            throw "Unexpected daemon version output: $($daemonVersion -join '; ')"
           }
           $installerBytes = [IO.File]::ReadAllBytes((Join-Path $output 'taildns-installer.exe'))
           $installerText = [Text.Encoding]::ASCII.GetString($installerBytes)
