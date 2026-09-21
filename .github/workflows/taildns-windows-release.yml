@@ -54,11 +54,11 @@ jobs:
           $versionFlags = "-X tailscale.com/version.longStamp=$env:LONG_VERSION -X tailscale.com/version.shortStamp=$env:UPSTREAM_VERSION -X tailscale.com/version.gitCommitStamp=$env:GITHUB_SHA"
           & .\tool\go.exe run ./cmd/mkmanifest amd64 cmd/taildns-installer/windows-manifest.xml cmd/taildns-installer/manifest_windows_amd64.syso
           try {
-            & .\tool\go.exe build -trimpath -ldflags $versionFlags -o (Join-Path $output 'taildnsd.exe') ./cmd/tailscaled
-            & .\tool\go.exe build -trimpath -ldflags $versionFlags -o (Join-Path $output 'tailscale.exe') ./cmd/tailscale
-            & .\tool\go.exe build -trimpath -ldflags $versionFlags -o (Join-Path $output 'taildns.exe') ./cmd/taildns
+            & .\tool\go.exe build -buildvcs=false -trimpath -ldflags $versionFlags -o (Join-Path $output 'taildnsd.exe') ./cmd/tailscaled
+            & .\tool\go.exe build -buildvcs=false -trimpath -ldflags $versionFlags -o (Join-Path $output 'tailscale.exe') ./cmd/tailscale
+            & .\tool\go.exe build -buildvcs=false -trimpath -ldflags $versionFlags -o (Join-Path $output 'taildns.exe') ./cmd/taildns
             $installerFlags = "$versionFlags -X main.updatePublicKeyBase64=$env:UPDATE_PUBLIC_KEY"
-            & .\tool\go.exe build -trimpath -ldflags $installerFlags -o (Join-Path $output 'taildns-installer.exe') ./cmd/taildns-installer
+            & .\tool\go.exe build -buildvcs=false -trimpath -ldflags $installerFlags -o (Join-Path $output 'taildns-installer.exe') ./cmd/taildns-installer
           } finally {
             Remove-Item -LiteralPath cmd/taildns-installer/manifest_windows_amd64.syso -ErrorAction SilentlyContinue
           }
