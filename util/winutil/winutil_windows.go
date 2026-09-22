@@ -433,10 +433,29 @@ func StartProcessAsChild(parentPID uint32, exePath string, extraEnv []string) er
 	return cmd.Start()
 }
 
-// StartProcessAsCurrentGUIUser is like StartProcessAsChild, but if finds
-// current logged in user desktop process (normally explorer.exe),
-// and passes found PID to StartProcessAsChild.
+// StartProcessAsCurrentGUIUser starts exePath as the user of the active desktop.
+// LocalSystem callers use the active session's user token. Other callers use
+// the desktop process (normally explorer.exe) as the new process's parent.
 func StartProcessAsCurrentGUIUser(exePath string, extraEnv []string) error {
+	if IsCurrentProcessLocalSystem() {
+		tsSessionID := WTSGetActiveConsoleSessionId()
+		if tsSessionID == ^uint32(0) {
+			return fmt.Errorf("failed to find desktop: %v", ErrNoShell)
+		}
+		logonSessionID, err := TSSessionIDToLogonSessionID(tsSessionID)
+		if err != nil {
+			return fmt.Errorf("failed to identify interactive user: %v", err)
+		}
+		err = startProcessInSessionWithEnvironment(SessionID{
+			LogonSession: logonSessionID,
+			TSSession:    tsSessionID,
+		}, CommandLineInfo{ExePath: exePath}, extraEnv)
+		if err != nil {
+			return fmt.Errorf("failed to start executable as interactive user: %v", err)
+		}
+		return nil
+	}
+
 	// as described in https://devblogs.microsoft.com/oldnewthing/20190425-00/?p=102443
 	desktop, err := GetDesktopPID()
 	if err != nil {
