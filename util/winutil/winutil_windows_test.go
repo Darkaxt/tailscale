@@ -33,6 +33,20 @@ func TestLookupPseudoUser(t *testing.T) {
 	}
 }
 
+func TestDesktopPIDForSession(t *testing.T) {
+	processes := []desktopProcess{
+		{pid: 10, sessionID: 0, executable: "explorer.exe"},
+		{pid: 20, sessionID: 1, executable: "notepad.exe"},
+		{pid: 30, sessionID: 1, executable: "Explorer.EXE"},
+	}
+	if got, ok := desktopPIDForSession(1, processes); !ok || got != 30 {
+		t.Fatalf("desktopPIDForSession = (%d, %t), want (30, true)", got, ok)
+	}
+	if got, ok := desktopPIDForSession(2, processes); ok || got != 0 {
+		t.Fatalf("missing desktopPIDForSession = (%d, %t), want (0, false)", got, ok)
+	}
+}
+
 type testType interface {
 	byte | uint16 | uint32 | uint64
 }
