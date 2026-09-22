@@ -64,6 +64,19 @@ func TestValidateUpdateTransitionRejectsReplay(t *testing.T) {
 	}
 }
 
+func TestValidateDaemonExecutable(t *testing.T) {
+	if err := validateDaemonExecutable(os.Getenv("ComSpec")); err != nil {
+		t.Fatalf("valid executable rejected: %v", err)
+	}
+	invalid := filepath.Join(t.TempDir(), "invalid.exe")
+	if err := os.WriteFile(invalid, []byte("not an executable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDaemonExecutable(invalid); err == nil {
+		t.Fatal("invalid executable accepted")
+	}
+}
+
 func TestDeploymentRecordCoversMatchingTrayPayload(t *testing.T) {
 	root := t.TempDir()
 	payload := filepath.Join(root, "payload")
