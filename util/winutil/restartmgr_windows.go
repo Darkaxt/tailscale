@@ -709,6 +709,16 @@ func StartProcessInSession(sessID SessionID, cmdLineInfo CommandLineInfo) error 
 	return StartProcessInSessionWithHandler(sessID, cmdLineInfo, nil)
 }
 
+func startProcessInSessionWithEnvironment(sessID SessionID, cmdLineInfo CommandLineInfo, extraEnv []string) error {
+	pi, err := startProcessInSessionInternal(sessID, cmdLineInfo, 0, extraEnv)
+	if err != nil {
+		return err
+	}
+	windows.CloseHandle(pi.Process)
+	windows.CloseHandle(pi.Thread)
+	return nil
+}
+
 // PostCreateProcessHandler is a function that is invoked by
 // StartProcessInSessionWithHandler when the child process has been successfully
 // created. It is the responsibility of the handler to close the pi.Thread and
@@ -722,7 +732,7 @@ type PostCreateProcessHandler func(pi *windows.ProcessInformation)
 // been successfully created, handler is invoked with the windows.ProcessInformation
 // that was returned by the OS.
 func StartProcessInSessionWithHandler(sessID SessionID, cmdLineInfo CommandLineInfo, handler PostCreateProcessHandler) error {
-	pi, err := startProcessInSessionInternal(sessID, cmdLineInfo, 0)
+	pi, err := startProcessInSessionInternal(sessID, cmdLineInfo, 0, nil)
 	if err != nil {
 		return err
 	}
@@ -746,7 +756,7 @@ func RunProcessInSession(sessID SessionID, cmdLineInfo CommandLineInfo, timeout 
 		return 1, err
 	}
 
-	pi, err := startProcessInSessionInternal(sessID, cmdLineInfo, 0)
+	pi, err := startProcessInSessionInternal(sessID, cmdLineInfo, 0, nil)
 	if err != nil {
 		return 1, err
 	}
@@ -772,7 +782,7 @@ func RunProcessInSession(sessID SessionID, cmdLineInfo CommandLineInfo, timeout 
 	return exitCode, nil
 }
 
-func startProcessInSessionInternal(sessID SessionID, cmdLineInfo CommandLineInfo, extraFlags uint32) (*windows.ProcessInformation, error) {
+func startProcessInSessionInternal(sessID SessionID, cmdLineInfo CommandLineInfo, extraFlags uint32, extraEnv []string) (*windows.ProcessInformation, error) {
 	if err := cmdLineInfo.Validate(); err != nil {
 		return nil, err
 	}
@@ -797,6 +807,7 @@ func startProcessInSessionInternal(sessID SessionID, cmdLineInfo CommandLineInfo
 	if err != nil {
 		return nil, fmt.Errorf("token environment: %w", err)
 	}
+	env = append(env, extraEnv...)
 	env16 := NewEnvBlock(env)
 
 	// The privileges in privNames are required for CreateProcessAsUser to be
