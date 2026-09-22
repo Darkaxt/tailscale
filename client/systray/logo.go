@@ -32,6 +32,10 @@ type tsLogo struct {
 
 	// overlay is called after the dots are rendered to draw an additional overlay.
 	overlay func(dc *gg.Context, borderUnits int, radius int)
+
+	// nativeIcon is an optional platform-native multi-resolution icon. When it
+	// is present, render returns it unchanged instead of rasterizing the logo.
+	nativeIcon []byte
 }
 
 var (
@@ -40,14 +44,14 @@ var (
 		0, 0, 0,
 		0, 0, 0,
 		0, 0, 0,
-	}}
+	}, nativeIcon: windowsDisconnectedIcon}
 
 	// connected is the normal Tailscale logo
 	connected = tsLogo{dots: [9]byte{
 		0, 0, 0,
 		1, 1, 1,
 		0, 1, 0,
-	}}
+	}, nativeIcon: windowsConnectedIcon}
 
 	// loading is a special tsLogo value that is not meant to be rendered directly,
 	// but indicates that the loading animation should be shown.
@@ -170,6 +174,7 @@ var (
 			dc.SetLineWidth(r)
 			dc.Stroke()
 		},
+		nativeIcon: windowsExitNodeOnlineIcon,
 	}
 
 	// exitNodeOffline is the Tailscale logo with a red "x" in the corner.
@@ -201,6 +206,7 @@ var (
 			dc.SetLineWidth(r)
 			dc.Stroke()
 		},
+		nativeIcon: windowsExitNodeOfflineIcon,
 	}
 )
 
@@ -257,6 +263,10 @@ func (logo tsLogo) render() *bytes.Buffer {
 // renderWithBorder returns a PNG image of the logo with the specified border width.
 // One border unit is equal to the radius of a tailscale logo dot.
 func (logo tsLogo) renderWithBorder(borderUnits int) *bytes.Buffer {
+	if len(logo.nativeIcon) != 0 {
+		return bytes.NewBuffer(logo.nativeIcon)
+	}
+
 	const radius = 25
 	dim := radius * (8 + borderUnits*2)
 
