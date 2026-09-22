@@ -1,8 +1,8 @@
 // Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
-// Command taildns-installer transactionally overlays an exact-version TailDNS
-// daemon and CLI on an existing official Tailscale Windows installation.
+// Command taildns-installer transactionally installs a matching TailDNS
+// daemon, CLI, resolver, and tray set over an existing Windows installation.
 package main
 
 import (
@@ -69,6 +69,20 @@ type fileRecord struct {
 	Existed       bool   `json:"existed"`
 }
 
+type registryValueRecord struct {
+	Path    string `json:"path"`
+	Name    string `json:"name"`
+	Value   string `json:"value,omitempty"`
+	Kind    uint32 `json:"kind,omitempty"`
+	Existed bool   `json:"existed"`
+}
+
+type startupRecord struct {
+	OfficialLink       fileRecord          `json:"officialLink"`
+	TailDNSRunValue    registryValueRecord `json:"taildnsRunValue"`
+	OfficialGUIRunning bool                `json:"officialGuiRunning"`
+}
+
 type deploymentRecord struct {
 	SchemaVersion          int                   `json:"schemaVersion"`
 	InstalledAtUTC         string                `json:"installedAtUtc"`
@@ -82,6 +96,7 @@ type deploymentRecord struct {
 	OriginalUpdateCheck    bool                  `json:"originalAutoUpdateCheck"`
 	OriginalUpdateApply    bool                  `json:"originalAutoUpdateApply"`
 	BaselineIdentity       machineIdentity       `json:"baselineIdentity"`
+	Startup                startupRecord         `json:"startup"`
 }
 
 type installResult struct {
@@ -239,6 +254,7 @@ func validateManifest(manifest releaseManifest) error {
 		"taildnsd.exe":          false,
 		"tailscale.exe":         false,
 		"taildns.exe":           false,
+		"taildns-ipn.exe":       false,
 		"taildns-installer.exe": false,
 	}
 	if len(manifest.Files) != len(required) {

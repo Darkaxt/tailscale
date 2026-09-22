@@ -40,12 +40,12 @@ jobs:
           "UPSTREAM_VERSION=$upstream" >> $env:GITHUB_ENV
           "RELEASE_SEQUENCE=$sequence" >> $env:GITHUB_ENV
           "LONG_VERSION=$upstream-taildns.$sequence" >> $env:GITHUB_ENV
-      - name: Test installer trust and transaction logic
+      - name: Test tray and installer contracts
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          & .\tool\go.exe test ./cmd/taildns-installer -count=1
-      - name: Build exact-version Windows payload
+          & .\tool\go.exe test ./client/systray ./cmd/taildns-ipn ./cmd/taildns-installer -count=1
+      - name: Build matching-core Windows payload
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -57,6 +57,7 @@ jobs:
             & .\tool\go.exe build -buildvcs=false -trimpath -ldflags $versionFlags -o (Join-Path $output 'taildnsd.exe') ./cmd/tailscaled
             & .\tool\go.exe build -buildvcs=false -trimpath -ldflags $versionFlags -o (Join-Path $output 'tailscale.exe') ./cmd/tailscale
             & .\tool\go.exe build -buildvcs=false -trimpath -ldflags $versionFlags -o (Join-Path $output 'taildns.exe') ./cmd/taildns
+            & .\tool\go.exe build -buildvcs=false -trimpath -ldflags "$versionFlags -H windowsgui" -o (Join-Path $output 'taildns-ipn.exe') ./cmd/taildns-ipn
             $installerFlags = "$versionFlags -X main.updatePublicKeyBase64=$env:UPDATE_PUBLIC_KEY"
             & .\tool\go.exe build -buildvcs=false -trimpath -ldflags $installerFlags -o (Join-Path $output 'taildns-installer.exe') ./cmd/taildns-installer
           } finally {
@@ -86,7 +87,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $output = Join-Path $env:RUNNER_TEMP 'taildns-windows-amd64'
-          $files = foreach ($name in @('taildnsd.exe', 'tailscale.exe', 'taildns.exe', 'taildns-installer.exe')) {
+          $files = foreach ($name in @('taildnsd.exe', 'tailscale.exe', 'taildns.exe', 'taildns-ipn.exe', 'taildns-installer.exe')) {
             $path = Join-Path $output $name
             [ordered]@{
               name = $name
@@ -134,7 +135,7 @@ jobs:
           set -euo pipefail
           test -n "$UPDATE_PRIVATE_KEY"
           test -n "$UPDATE_PUBLIC_KEY"
-          for required in taildnsd.exe tailscale.exe taildns.exe taildns-installer.exe taildns-windows-update.json README.md TAILSCALE-CORE-LICENSE.txt; do
+          for required in taildnsd.exe tailscale.exe taildns.exe taildns-ipn.exe taildns-installer.exe taildns-windows-update.json README.md TAILSCALE-CORE-LICENSE.txt; do
             test -f "candidate/$required"
           done
           if find candidate -type l | grep -q .; then
@@ -142,7 +143,7 @@ jobs:
             exit 1
           fi
           diff -u \
-            <(printf '%s\n' README.md TAILSCALE-CORE-LICENSE.txt taildns-installer.exe taildns-windows-update.json taildns.exe taildnsd.exe tailscale.exe) \
+            <(printf '%s\n' README.md TAILSCALE-CORE-LICENSE.txt taildns-installer.exe taildns-ipn.exe taildns-windows-update.json taildns.exe taildnsd.exe tailscale.exe) \
             <(find candidate -maxdepth 1 -type f -printf '%f\n' | sort)
           if [[ "$GITHUB_REF_NAME" =~ ^windows-v([0-9]+\.[0-9]+\.[0-9]+)\+([1-9][0-9]*)$ ]]; then
             upstream="${BASH_REMATCH[1]}"
@@ -158,11 +159,11 @@ jobs:
           test "$(jq -r '.platform' candidate/taildns-windows-update.json)" = windows
           test "$(jq -r '.arch' candidate/taildns-windows-update.json)" = amd64
           test "$(jq -r '.coreCommit' candidate/taildns-windows-update.json)" = "$GITHUB_SHA"
-          test "$(jq '.files | length' candidate/taildns-windows-update.json)" = 4
+          test "$(jq '.files | length' candidate/taildns-windows-update.json)" = 5
           diff -u \
-            <(printf '%s\n' taildns-installer.exe taildns.exe taildnsd.exe tailscale.exe) \
+            <(printf '%s\n' taildns-installer.exe taildns-ipn.exe taildns.exe taildnsd.exe tailscale.exe) \
             <(jq -r '.files[].name' candidate/taildns-windows-update.json | sort)
-          for payload in taildnsd.exe tailscale.exe taildns.exe taildns-installer.exe; do
+          for payload in taildnsd.exe tailscale.exe taildns.exe taildns-ipn.exe taildns-installer.exe; do
             expected_hash="$(jq -r --arg name "$payload" '.files[] | select(.name == $name) | .sha256' candidate/taildns-windows-update.json)"
             expected_size="$(jq -r --arg name "$payload" '.files[] | select(.name == $name) | .size' candidate/taildns-windows-update.json)"
             test "$(sha256sum "candidate/$payload" | cut -d' ' -f1)" = "$expected_hash"
@@ -192,9 +193,9 @@ jobs:
             exit 1
           fi
           cat > "$RUNNER_TEMP/release-notes.md" <<EOF
-          TailDNS Windows overlay for official Tailscale ${GITHUB_REF_NAME#windows-v}.
+          TailDNS Windows client ${GITHUB_REF_NAME#windows-v}.
 
-          The native installer preserves the official proprietary GUI, Wintun driver, node identity, login, Tailnet Lock identity, service registration, and state. It replaces only the exact-version open-source daemon and CLI and installs the TailDNS resolver. Failed activation rolls back to verified originals.
+          The native installer transactionally installs one matching current-core TailDNS set: daemon, CLI, resolver, and independently implemented tray client. It preserves Wintun, node identity, login, Tailnet Lock identity, service registration, state, and the official GUI as rollback material until activation passes. Failed activation restores the verified previous binaries and startup state.
 
           The official Tailscale updater remains disabled while this overlay is installed. TailDNS update metadata is authenticated by the separately managed Ed25519 manifest signature; this is not Authenticode code signing.
           EOF

@@ -22,6 +22,7 @@ func TestVerifyReleaseManifest(t *testing.T) {
 		"taildnsd.exe":          []byte("daemon"),
 		"tailscale.exe":         []byte("cli"),
 		"taildns.exe":           []byte("resolver"),
+		"taildns-ipn.exe":       []byte("tray"),
 		"taildns-installer.exe": []byte("installer"),
 	}
 	manifestFiles := make([]releaseFile, 0, len(files))
@@ -110,6 +111,7 @@ func TestValidateManifestRejectsWrongReleaseIdentity(t *testing.T) {
 			{Name: "taildnsd.exe", SHA256: strings.Repeat("0", 64), Size: 1},
 			{Name: "tailscale.exe", SHA256: strings.Repeat("0", 64), Size: 1},
 			{Name: "taildns.exe", SHA256: strings.Repeat("0", 64), Size: 1},
+			{Name: "taildns-ipn.exe", SHA256: strings.Repeat("0", 64), Size: 1},
 			{Name: "taildns-installer.exe", SHA256: strings.Repeat("0", 64), Size: 1},
 		},
 	}
@@ -164,7 +166,7 @@ func TestIdentityContinuity(t *testing.T) {
 
 func TestDeploymentRecordDoesNotContainPrivateState(t *testing.T) {
 	record := deploymentRecord{
-		SchemaVersion: 3,
+		SchemaVersion: 4,
 		Version:       "1.102.4+1",
 		ServicePath:   `"C:\Program Files\Tailscale\tailscaled.exe"`,
 		BaselineIdentity: machineIdentity{

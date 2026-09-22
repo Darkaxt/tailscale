@@ -27,15 +27,18 @@ import (
 	"fyne.io/systray"
 	ico "github.com/Kodeworks/golang-image-ico"
 	"github.com/atotto/clipboard"
-	dbus "github.com/godbus/dbus/v5"
 	"github.com/toqueteos/webbrowser"
 	"tailscale.com/client/local"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tailcfg/nodecap"
+	"tailscale.com/util/backoff"
 	"tailscale.com/util/slicesx"
 	"tailscale.com/util/stringsx"
+	"tailscale.com/util/syspolicy/pkey"
+	"tailscale.com/util/syspolicy/policyclient"
+	"tailscale.com/version"
 )
 
 var (
@@ -73,7 +76,7 @@ func (menu *Menu) Run(client *local.Client) {
 	// set initial title, which is used by the systray package as the ID of the StatusNotifierItem.
 	// This value will get overwritten later as the client status changes.
 	// This must be called before systray.Run.
-	systray.SetTitle("tailscale")
+	systray.SetTitle(menu.productName())
 
 	systray.Run(menu.onReady, menu.onExit)
 }
@@ -82,8 +85,15 @@ func (menu *Menu) Run(client *local.Client) {
 type Menu struct {
 	mu sync.Mutex // protects the entire Menu
 
+	// ProductName customizes the visible tray identity. The zero value keeps
+	// upstream Tailscale branding for existing callers.
+	ProductName string
+
 	lc          *local.Client
 	status      *ipnstate.Status
+	prefs       *ipn.Prefs
+	localDNS    *ipn.LocalDNSStatus
+	policy      *policyclient.PolicySnapshot
 	curProfile  ipn.LoginProfile
 	allProfiles []ipn.LoginProfile
 
@@ -96,21 +106,42 @@ type Menu struct {
 	bgCancel context.CancelFunc
 
 	// Top-level menu items
-	connect     *systray.MenuItem
-	disconnect  *systray.MenuItem
-	self        *systray.MenuItem
-	exitNodes   *systray.MenuItem
-	more        *systray.MenuItem
-	rebuildMenu *systray.MenuItem
-	quit        *systray.MenuItem
+	connect      *systray.MenuItem
+	disconnect   *systray.MenuItem
+	self         *systray.MenuItem
+	exitNodes    *systray.MenuItem
+	preferences  *systray.MenuItem
+	localDNSMenu *systray.MenuItem
+	more         *systray.MenuItem
+	rebuildMenu  *systray.MenuItem
+	quit         *systray.MenuItem
 
-	rebuildCh  chan struct{} // triggers a menu rebuild
-	accountsCh chan ipn.ProfileID
-	exitNodeCh chan tailcfg.StableNodeID // ID of selected exit node
+	rebuildCh         chan struct{} // triggers a menu rebuild
+	accountsCh        chan ipn.ProfileID
+	accountActionCh   chan accountAction
+	exitNodeCh        chan tailcfg.StableNodeID // ID of selected exit node
+	exitNodeLANCh     chan bool
+	runExitNodeCh     chan bool
+	prefCh            chan preferenceSelection
+	resetCh           chan struct{}
+	localDNSApplyCh   chan string
+	localDNSDisableCh chan struct{}
 
 	eventCancel context.CancelFunc // cancel eventLoop
 
 	notificationIcon *os.File // icon used for desktop notifications
+}
+
+func (menu *Menu) productName() string {
+	if menu.ProductName != "" {
+		return menu.ProductName
+	}
+	return "Tailscale"
+}
+
+type preferenceSelection struct {
+	action  preferenceAction
+	enabled bool
 }
 
 func (menu *Menu) init() {
@@ -121,7 +152,14 @@ func (menu *Menu) init() {
 
 	menu.rebuildCh = make(chan struct{}, 1)
 	menu.accountsCh = make(chan ipn.ProfileID)
+	menu.accountActionCh = make(chan accountAction)
 	menu.exitNodeCh = make(chan tailcfg.StableNodeID)
+	menu.exitNodeLANCh = make(chan bool)
+	menu.runExitNodeCh = make(chan bool)
+	menu.prefCh = make(chan preferenceSelection)
+	menu.resetCh = make(chan struct{})
+	menu.localDNSApplyCh = make(chan string)
+	menu.localDNSDisableCh = make(chan struct{})
 
 	// dbus wants a file path for notification icons, so copy to a temp file.
 	menu.notificationIcon, _ = os.CreateTemp("", "tailscale-systray.png")
@@ -205,6 +243,17 @@ func (menu *Menu) updateState() {
 	if err != nil {
 		log.Print(err)
 	}
+	menu.prefs, err = menu.lc.GetPrefs(menu.bgCtx)
+	if err != nil {
+		if local.IsAccessDeniedError(err) {
+			menu.readonly = true
+		}
+		log.Print(err)
+	}
+	menu.localDNS, err = menu.lc.LocalDNSStatus(menu.bgCtx)
+	if err != nil {
+		log.Printf("TailDNS resolver status: %v", err)
+	}
 	menu.curProfile, menu.allProfiles, err = menu.lc.ProfileStatus(menu.bgCtx)
 	if err != nil {
 		if local.IsAccessDeniedError(err) {
@@ -285,6 +334,9 @@ func (menu *Menu) rebuild() {
 		menu.connect.Disable()
 		menu.disconnect.Disable()
 	}
+	if alwaysOn, configured := policyBool(menu.policy, pkey.AlwaysOn); configured && alwaysOn {
+		menu.disconnect.Disable()
+	}
 
 	account := "Account"
 	if pt := profileTitle(menu.curProfile); pt != "" {
@@ -312,6 +364,25 @@ func (menu *Menu) rebuild() {
 				})
 			}
 		}
+		if accountMenuNeedsSeparator(len(menu.allProfiles)) {
+			accounts.AddSeparator()
+		}
+		addAccount := accounts.AddSubMenuItem("Add account...", "")
+		onClick(ctx, addAccount, func(ctx context.Context) {
+			select {
+			case <-ctx.Done():
+			case menu.accountActionCh <- accountAdd:
+			}
+		})
+		if menu.curProfile.ID != "" {
+			logout := accounts.AddSubMenuItem("Log out", "")
+			onClick(ctx, logout, func(ctx context.Context) {
+				select {
+				case <-ctx.Done():
+				case menu.accountActionCh <- accountLogout:
+				}
+			})
+		}
 	}
 
 	if menu.status != nil && menu.status.Self != nil && len(menu.status.Self.TailscaleIPs) > 0 {
@@ -321,10 +392,108 @@ func (menu *Menu) rebuild() {
 		menu.self = systray.AddMenuItem("This Device: not connected", "")
 		menu.self.Disable()
 	}
+	if policyVisible(menu.policy, pkey.NetworkDevicesVisibility) {
+		devices := systray.AddMenuItem("Network devices", "")
+		if menu.status == nil || len(menu.status.Peer) == 0 {
+			devices.Disable()
+		} else {
+			peers := make([]*ipnstate.PeerStatus, 0, len(menu.status.Peer))
+			for _, peer := range menu.status.Peer {
+				peers = append(peers, peer)
+			}
+			slices.SortFunc(peers, func(a, b *ipnstate.PeerStatus) int {
+				return stringsx.CompareFold(a.DNSName, b.DNSName)
+			})
+			for _, peer := range peers {
+				name := strings.Split(peer.DNSName, ".")[0]
+				if !peer.Online {
+					name += " (offline)"
+				}
+				item := devices.AddSubMenuItem(name, "Copy Tailscale address")
+				onClick(ctx, item, func(context.Context) { menu.copyTailscaleIP(peer) })
+			}
+		}
+	}
 	systray.AddSeparator()
 
-	if !menu.readonly {
+	if !menu.readonly && policyVisible(menu.policy, pkey.ExitNodeMenuVisibility) {
 		menu.rebuildExitNodeMenu(ctx)
+	}
+
+	if policyVisible(menu.policy, pkey.PreferencesMenuVisibility) {
+		menu.preferences = systray.AddMenuItem("Preferences", "")
+		if menu.readonly || menu.prefs == nil {
+			menu.preferences.Disable()
+		} else {
+			for _, pref := range preferenceSnapshot(menu.prefs) {
+				if pref.action == prefAutoUpdate && !policyVisible(menu.policy, pkey.UpdateMenuVisibility) {
+					continue
+				}
+				item := menu.preferences.AddSubMenuItemCheckbox(pref.title, "", pref.checked)
+				if !pref.available || !policyPreferenceEditable(menu.policy, preferencePolicyKey(pref.action)) {
+					item.Disable()
+					continue
+				}
+				onClick(ctx, item, func(ctx context.Context) {
+					select {
+					case <-ctx.Done():
+					case menu.prefCh <- preferenceSelection{action: pref.action, enabled: !pref.checked}:
+					}
+				})
+			}
+			if policyVisible(menu.policy, pkey.ResetToDefaultsVisibility) {
+				menu.preferences.AddSeparator()
+				reset := menu.preferences.AddSubMenuItem("Reset to defaults", "")
+				onClick(ctx, reset, func(ctx context.Context) {
+					select {
+					case <-ctx.Done():
+					case menu.resetCh <- struct{}{}:
+					}
+				})
+			}
+		}
+	}
+
+	menu.localDNSMenu = systray.AddMenuItem("TailDNS resolver", "")
+	if menu.readonly || menu.localDNS == nil {
+		menu.localDNSMenu.Disable()
+	} else {
+		state := "Disabled"
+		if menu.localDNS.Configured {
+			state = "Configured: " + menu.localDNS.Endpoint
+			if menu.localDNS.Applied {
+				state = "Applied: " + menu.localDNS.Endpoint
+			}
+		}
+		statusItem := menu.localDNSMenu.AddSubMenuItem(state, menu.localDNS.Reason)
+		statusItem.Disable()
+		apply := menu.localDNSMenu.AddSubMenuItem("Use HTTPS endpoint from clipboard", "")
+		if !policyPreferenceEditable(menu.policy, pkey.EnableTailscaleDNS) {
+			apply.Disable()
+		} else {
+			onClick(ctx, apply, func(ctx context.Context) {
+				endpoint, err := clipboard.ReadAll()
+				if err != nil {
+					log.Printf("reading resolver endpoint from clipboard: %v", err)
+					return
+				}
+				select {
+				case <-ctx.Done():
+				case menu.localDNSApplyCh <- strings.TrimSpace(endpoint):
+				}
+			})
+		}
+		disable := menu.localDNSMenu.AddSubMenuItem("Disable custom resolver", "")
+		if !menu.localDNS.Configured || !policyPreferenceEditable(menu.policy, pkey.EnableTailscaleDNS) {
+			disable.Disable()
+		} else {
+			onClick(ctx, disable, func(ctx context.Context) {
+				select {
+				case <-ctx.Done():
+				case menu.localDNSDisableCh <- struct{}{}:
+				}
+			})
+		}
 	}
 
 	menu.more = systray.AddMenuItem("More settings", "")
@@ -348,10 +517,29 @@ func (menu *Menu) rebuild() {
 	})
 	menu.rebuildMenu.Enable()
 
-	menu.quit = systray.AddMenuItem("Quit", "Quit the app")
+	if policyVisible(menu.policy, pkey.AdminConsoleVisibility) {
+		admin := systray.AddMenuItem("Admin console", "")
+		onClick(ctx, admin, func(context.Context) {
+			if err := webbrowser.Open("https://login.tailscale.com/admin/machines"); err != nil {
+				log.Printf("opening admin console: %v", err)
+			}
+		})
+	}
+	about := systray.AddMenuItem("About TailDNS "+version.Long(), "Open TailDNS project and releases")
+	onClick(ctx, about, func(context.Context) {
+		if err := webbrowser.Open("https://github.com/Darkaxt/TailDNS"); err != nil {
+			log.Printf("opening TailDNS project: %v", err)
+		}
+	})
+
+	menu.quit = systray.AddMenuItem("Exit", "Exit TailDNS for this session")
 	menu.quit.Enable()
 
 	go menu.eventLoop(ctx)
+}
+
+func accountMenuNeedsSeparator(profileCount int) bool {
+	return profileCount > 1
 }
 
 // profileTitle returns the title string for a profile menu item.
@@ -473,6 +661,11 @@ func (menu *Menu) eventLoop(ctx context.Context) {
 				log.Printf("error switching to profile ID %v: %v", id, err)
 			}
 
+		case action := <-menu.accountActionCh:
+			if err := applyAccountAction(ctx, menu.lc, action); err != nil {
+				log.Printf("error applying account action %s: %v", action, err)
+			}
+
 		case exitNode := <-menu.exitNodeCh:
 			if exitNode.IsZero() {
 				log.Print("disable exit node")
@@ -490,6 +683,39 @@ func (menu *Menu) eventLoop(ctx context.Context) {
 				if _, err := menu.lc.EditPrefs(ctx, mp); err != nil {
 					log.Printf("error setting exit node: %v", err)
 				}
+			}
+
+		case enabled := <-menu.exitNodeLANCh:
+			if _, err := menu.lc.EditPrefs(ctx, exitNodeLANEdit(enabled)); err != nil {
+				log.Printf("error changing exit-node LAN access: %v", err)
+			}
+
+		case enabled := <-menu.runExitNodeCh:
+			if menu.prefs == nil {
+				continue
+			}
+			if _, err := menu.lc.EditPrefs(ctx, runExitNodeEdit(menu.prefs.AdvertiseRoutes, enabled)); err != nil {
+				log.Printf("error changing exit-node advertisement: %v", err)
+			}
+
+		case pref := <-menu.prefCh:
+			if err := applyPreference(ctx, menu.lc, pref.action, pref.enabled); err != nil {
+				log.Printf("error changing %s: %v", pref.action, err)
+			}
+
+		case <-menu.resetCh:
+			if _, err := menu.lc.EditPrefs(ctx, resetPreferenceEdit()); err != nil {
+				log.Printf("error resetting preferences: %v", err)
+			}
+
+		case endpoint := <-menu.localDNSApplyCh:
+			if err := applyLocalDNS(ctx, menu.lc, endpoint); err != nil {
+				log.Printf("error applying TailDNS resolver: %v", err)
+			}
+
+		case <-menu.localDNSDisableCh:
+			if err := disableLocalDNS(ctx, menu.lc); err != nil {
+				log.Printf("error disabling TailDNS resolver: %v", err)
 			}
 
 		case <-menu.quit.ClickedCh:
@@ -515,24 +741,22 @@ func onClick(ctx context.Context, item *systray.MenuItem, fn func(ctx context.Co
 // watchIPNBus subscribes to the tailscale event bus and sends state updates to chState.
 // This method does not return.
 func (menu *Menu) watchIPNBus() {
+	bo := backoff.NewBackoff("TailDNS IPN bus", log.Printf, 3*time.Second)
 	for {
-		if err := menu.watchIPNBusInner(); err != nil {
-			log.Println(err)
-			if errors.Is(err, context.Canceled) {
-				// If the context got canceled, we will never be able to
-				// reconnect to IPN bus, so exit the process.
-				log.Fatalf("watchIPNBus: %v", err)
-			}
+		err := menu.watchIPNBusInner()
+		if menu.bgCtx.Err() != nil || errors.Is(err, context.Canceled) {
+			return
 		}
-		// If our watch connection breaks, wait a bit before reconnecting. No
-		// reason to spam the logs if e.g. tailscaled is restarting or goes
-		// down.
-		time.Sleep(3 * time.Second)
+		log.Println(err)
+		// The LocalAPI dialer itself waits for the Windows service pipe. A
+		// context-aware backoff only throttles repeated protocol failures; it
+		// does not classify a timeout as a service transition or cancel work.
+		bo.BackOff(menu.bgCtx, err)
 	}
 }
 
 func (menu *Menu) watchIPNBusInner() error {
-	watcher, err := menu.lc.WatchIPNBus(menu.bgCtx, 0)
+	watcher, err := menu.lc.WatchIPNBus(menu.bgCtx, ipn.NotifySysPolicyChanges)
 	if err != nil {
 		return fmt.Errorf("watching ipn bus: %w", err)
 	}
@@ -563,6 +787,12 @@ func (menu *Menu) watchIPNBusInner() error {
 			if n.Prefs != nil {
 				rebuild = true
 			}
+			if n.Policy != nil {
+				menu.mu.Lock()
+				menu.policy = n.Policy
+				menu.mu.Unlock()
+				rebuild = true
+			}
 			if rebuild {
 				menu.rebuildCh <- struct{}{}
 			}
@@ -583,22 +813,6 @@ func (menu *Menu) copyTailscaleIP(device *ipnstate.PeerStatus) {
 		log.Printf("clipboard error: %v", err)
 	} else {
 		menu.sendNotification(fmt.Sprintf("Copied Address for %v", name), ip)
-	}
-}
-
-// sendNotification sends a desktop notification with the given title and content.
-func (menu *Menu) sendNotification(title, content string) {
-	conn, err := dbus.SessionBus()
-	if err != nil {
-		log.Printf("dbus: %v", err)
-		return
-	}
-	timeout := 3 * time.Second
-	obj := conn.Object("org.freedesktop.Notifications", "/org/freedesktop/Notifications")
-	call := obj.Call("org.freedesktop.Notifications.Notify", 0, "Tailscale", uint32(0),
-		menu.notificationIcon.Name(), title, content, []string{}, map[string]dbus.Variant{}, int32(timeout.Milliseconds()))
-	if call.Err != nil {
-		log.Printf("dbus: %v", call.Err)
 	}
 }
 
@@ -623,9 +837,38 @@ func (menu *Menu) rebuildExitNodeMenu(ctx context.Context) {
 
 	noExitNodeMenu := menu.exitNodes.AddSubMenuItemCheckbox("None", "", status.ExitNodeStatus == nil)
 	setExitNodeOnClick(noExitNodeMenu, "")
+	if menu.prefs != nil {
+		allowLAN := menu.exitNodes.AddSubMenuItemCheckbox("Allow local network access", "", menu.prefs.ExitNodeAllowLANAccess)
+		if status.ExitNodeStatus == nil {
+			allowLAN.Disable()
+		} else if !policyPreferenceEditable(menu.policy, pkey.ExitNodeAllowLANAccess) {
+			allowLAN.Disable()
+		} else {
+			onClick(ctx, allowLAN, func(ctx context.Context) {
+				select {
+				case <-ctx.Done():
+				case menu.exitNodeLANCh <- !menu.prefs.ExitNodeAllowLANAccess:
+				}
+			})
+		}
+		if policyVisible(menu.policy, pkey.RunExitNodeVisibility) {
+			menu.exitNodes.AddSeparator()
+			runExitNode := menu.exitNodes.AddSubMenuItemCheckbox("Run as exit node", "", menu.prefs.AdvertisesExitNode())
+			if !policyPreferenceEditable(menu.policy, pkey.EnableRunExitNode) {
+				runExitNode.Disable()
+			} else {
+				onClick(ctx, runExitNode, func(ctx context.Context) {
+					select {
+					case <-ctx.Done():
+					case menu.runExitNodeCh <- !menu.prefs.AdvertisesExitNode():
+					}
+				})
+			}
+		}
+	}
 
 	// Show recommended exit node if available.
-	if status.Self.CapMap.Contains(nodecap.SuggestExitNodeUI) {
+	if status.Self.CapMap.Contains(nodecap.SuggestExitNodeUI) && policyVisible(menu.policy, pkey.SuggestedExitNodeVisibility) {
 		sugg, err := menu.lc.SuggestExitNode(ctx)
 		if err == nil {
 			// Location is invalid for suggested exit nodes that have
@@ -727,7 +970,6 @@ func (menu *Menu) rebuildExitNodeMenu(ctx context.Context) {
 		}
 	}
 
-	// TODO: "Allow Local Network Access" and "Run Exit Node" menu items
 }
 
 // mullvadPeers contains all mullvad peer nodes, sorted by country and city.
