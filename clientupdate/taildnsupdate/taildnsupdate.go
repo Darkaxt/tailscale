@@ -110,6 +110,15 @@ func PrepareLatest(ctx context.Context, client *http.Client, apiURL, destination
 		os.RemoveAll(destination)
 		return Manifest{}, err
 	}
+	for name, data := range map[string][]byte{
+		"taildns-windows-update.json":     manifestRaw,
+		"taildns-windows-update.json.sig": signature,
+	} {
+		if err := os.WriteFile(filepath.Join(destination, name), data, 0o600); err != nil {
+			os.RemoveAll(destination)
+			return Manifest{}, fmt.Errorf("staging %s: %w", name, err)
+		}
+	}
 	return manifest, nil
 }
 

@@ -136,7 +136,7 @@ func platformInstall(payloadDir string, manifest releaseManifest, dnsEndpoint st
 		return result, fmt.Errorf("disabling official automatic updates: %w", err)
 	}
 
-	if err := stopService(service); err != nil {
+	if err := stopService(service, paths.Daemon); err != nil {
 		return result, err
 	}
 	for sourceName, destination := range map[string]string{
@@ -253,7 +253,7 @@ func platformUpdate(payloadDir string, manifest releaseManifest) (result install
 	if err := terminateProcessesByPath(paths.Tray); err != nil {
 		return result, fmt.Errorf("stopping TailDNS tray for update: %w", err)
 	}
-	if err := stopService(service); err != nil {
+	if err := stopService(service, paths.Daemon); err != nil {
 		return result, err
 	}
 	for sourceName, destination := range map[string]string{
@@ -780,7 +780,7 @@ func restoreRecord(service *mgr.Service, paths installPaths, record deploymentRe
 	if err := terminateProcessesByPath(paths.Tray); err != nil {
 		return fmt.Errorf("stopping TailDNS tray before rollback: %w", err)
 	}
-	if err := stopService(service); err != nil {
+	if err := stopService(service, paths.Daemon); err != nil {
 		return err
 	}
 	for name, file := range record.Files {
@@ -821,18 +821,23 @@ func removeKnownInstalled(file fileRecord) error {
 	return os.Remove(file.Path)
 }
 
-func stopService(service *mgr.Service) error {
+func stopService(service *mgr.Service, daemonPath string) error {
 	status, err := service.Query()
 	if err != nil {
 		return err
 	}
-	if status.State == svc.Stopped {
-		return nil
+	if status.State != svc.Stopped {
+		if _, err := service.Control(svc.Stop); err != nil && status.State != svc.StopPending {
+			return fmt.Errorf("stopping Tailscale service: %w", err)
+		}
+		if err := waitServiceState(service, svc.Stopped); err != nil {
+			return err
+		}
 	}
-	if _, err := service.Control(svc.Stop); err != nil && status.State != svc.StopPending {
-		return fmt.Errorf("stopping Tailscale service: %w", err)
+	if err := terminateProcessesByPath(daemonPath); err != nil {
+		return fmt.Errorf("stopping remaining Tailscale daemon processes: %w", err)
 	}
-	return waitServiceState(service, svc.Stopped)
+	return nil
 }
 
 func startService(service *mgr.Service) error {
