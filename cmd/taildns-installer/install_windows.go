@@ -1059,8 +1059,8 @@ func readIdentity(cli string) (machineIdentity, error) {
 	if err := commandJSON(cli, &status, "status", "--json"); err != nil {
 		return machineIdentity{}, err
 	}
-	if status.BackendState != "Running" || !status.HaveNodeKey || !status.Self.Online || status.Self.ID == "" || status.Self.DNSName == "" {
-		return machineIdentity{}, errors.New("Tailscale backend is not authenticated and running")
+	if err := validateIdentityStatus(status); err != nil {
+		return machineIdentity{}, err
 	}
 	output, err := exec.Command(cli, "lock", "status").CombinedOutput()
 	if err != nil {
@@ -1074,6 +1074,13 @@ func readIdentity(cli string) (machineIdentity, error) {
 		return machineIdentity{}, errors.New("Tailnet Lock signing-key identity is unavailable")
 	}
 	return machineIdentity{NodeID: status.Self.ID, TailscaleIPs: status.Self.TailscaleIPs, TailnetLockKey: string(match[1]), DNSName: status.Self.DNSName}, nil
+}
+
+func validateIdentityStatus(status statusJSON) error {
+	if status.BackendState != "Running" || !status.HaveNodeKey || status.Self.ID == "" || status.Self.DNSName == "" || len(status.Self.TailscaleIPs) == 0 {
+		return errors.New("Tailscale backend is not authenticated and ready")
+	}
+	return nil
 }
 
 func bytesContains(haystack, needle []byte) bool {

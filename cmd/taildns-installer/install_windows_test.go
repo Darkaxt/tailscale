@@ -77,6 +77,23 @@ func TestValidateDaemonExecutable(t *testing.T) {
 	}
 }
 
+func TestValidateIdentityStatusAllowsControlPlaneReconnect(t *testing.T) {
+	var status statusJSON
+	status.BackendState = "Running"
+	status.HaveNodeKey = true
+	status.Self.ID = "n1"
+	status.Self.DNSName = "beacon.example.ts.net."
+	status.Self.TailscaleIPs = []string{"100.64.0.1"}
+	status.Self.Online = false
+	if err := validateIdentityStatus(status); err != nil {
+		t.Fatalf("authenticated running identity rejected while control plane reconnects: %v", err)
+	}
+	status.HaveNodeKey = false
+	if err := validateIdentityStatus(status); err == nil {
+		t.Fatal("identity without a node key accepted")
+	}
+}
+
 func TestDeploymentRecordCoversMatchingTrayPayload(t *testing.T) {
 	root := t.TempDir()
 	payload := filepath.Join(root, "payload")
