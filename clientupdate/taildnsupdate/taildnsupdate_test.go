@@ -6,15 +6,104 @@ package taildnsupdate
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestPrepareLatestStagesInstallerVerificationInputs(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := map[string][]byte{
+		"taildnsd.exe":          []byte("daemon"),
+		"tailscale.exe":         []byte("cli"),
+		"taildns.exe":           []byte("resolver"),
+		"taildns-ipn.exe":       []byte("tray"),
+		"taildns-installer.exe": []byte("installer"),
+	}
+	manifest := Manifest{
+		SchemaVersion:   1,
+		Product:         "TailDNS",
+		UpstreamVersion: "1.103.0",
+		Sequence:        6,
+		Platform:        "windows",
+		Arch:            "amd64",
+		CoreCommit:      strings.Repeat("a", 40),
+	}
+	for name, data := range payload {
+		sum := sha256.Sum256(data)
+		manifest.Files = append(manifest.Files, File{Name: name, SHA256: hex.EncodeToString(sum[:]), Size: int64(len(data))})
+	}
+	manifestRaw, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := []byte(base64.StdEncoding.EncodeToString(ed25519.Sign(priv, manifestRaw)))
+	var archive bytes.Buffer
+	zw := zip.NewWriter(&archive)
+	for name, data := range payload {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/latest":
+			json.NewEncoder(w).Encode(map[string]any{"assets": []map[string]string{
+				{"name": "taildns-windows-update.json", "browser_download_url": server.URL + "/manifest"},
+				{"name": "taildns-windows-update.json.sig", "browser_download_url": server.URL + "/signature"},
+				{"name": "taildns-windows-amd64.zip", "browser_download_url": server.URL + "/archive"},
+			}})
+		case "/manifest":
+			w.Write(manifestRaw)
+		case "/signature":
+			w.Write(signature)
+		case "/archive":
+			w.Write(archive.Bytes())
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	destination := filepath.Join(t.TempDir(), "candidate")
+	if _, err := PrepareLatest(context.Background(), server.Client(), server.URL+"/latest", destination, "1.103.0-taildns.5", base64.StdEncoding.EncodeToString(pub)); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string][]byte{
+		"taildns-windows-update.json":     manifestRaw,
+		"taildns-windows-update.json.sig": signature,
+	} {
+		got, err := os.ReadFile(filepath.Join(destination, name))
+		if err != nil {
+			t.Fatalf("reading staged %s: %v", name, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("staged %s does not match verified download", name)
+		}
+	}
+}
 
 func TestVerifyManifestOrderingAndSignature(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
