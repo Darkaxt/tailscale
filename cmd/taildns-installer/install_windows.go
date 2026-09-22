@@ -264,6 +264,9 @@ func platformUpdate(payloadDir string, manifest releaseManifest) (result install
 			return result, err
 		}
 	}
+	if err := validateDaemonExecutable(paths.Daemon); err != nil {
+		return result, err
+	}
 	if err := startService(service); err != nil {
 		return result, err
 	}
@@ -795,6 +798,9 @@ func restoreRecord(service *mgr.Service, paths installPaths, record deploymentRe
 			return err
 		}
 	}
+	if err := validateDaemonExecutable(paths.Daemon); err != nil {
+		return err
+	}
 	if err := startService(service); err != nil {
 		return err
 	}
@@ -852,6 +858,17 @@ func startService(service *mgr.Service) error {
 		return fmt.Errorf("starting Tailscale service: %w", err)
 	}
 	return waitServiceState(service, svc.Running)
+}
+
+func validateDaemonExecutable(path string) error {
+	output, err := exec.Command(path, "--version").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("validating Tailscale service executable: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	if strings.TrimSpace(string(output)) == "" {
+		return errors.New("validating Tailscale service executable: version output is empty")
+	}
+	return nil
 }
 
 func waitServiceState(service *mgr.Service, wanted svc.State) error {
