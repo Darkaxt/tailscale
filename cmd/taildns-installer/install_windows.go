@@ -23,27 +23,33 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
+	"tailscale.com/util/winutil"
 )
 
 const (
-	serviceName = "Tailscale"
-	recordName  = "deployment-v3.json"
+	serviceName  = "Tailscale"
+	recordName   = "deployment-v4.json"
+	runKeyPath   = `Software\Microsoft\Windows\CurrentVersion\Run`
+	runValueName = "TailDNS"
 )
 
 var replaceFileW = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReplaceFileW")
 
 type installPaths struct {
-	InstallDir  string
-	Daemon      string
-	CLI         string
-	Resolver    string
-	GUI         string
-	Wintun      string
-	State       string
-	ProgramData string
-	Record      string
+	InstallDir      string
+	Daemon          string
+	CLI             string
+	Resolver        string
+	GUI             string
+	Tray            string
+	Wintun          string
+	OfficialStartup string
+	State           string
+	ProgramData     string
+	Record          string
 }
 
 type statusJSON struct {
@@ -89,7 +95,7 @@ func platformInstall(payloadDir string, manifest releaseManifest, dnsEndpoint st
 	if err != nil {
 		return result, err
 	}
-	if err := validateInstalledBaseline(paths, manifest.UpstreamVersion); err != nil {
+	if err := validateInstalledBaseline(paths); err != nil {
 		return result, err
 	}
 	baseline, err := readIdentity(paths.CLI)
@@ -133,9 +139,10 @@ func platformInstall(payloadDir string, manifest releaseManifest, dnsEndpoint st
 		return result, err
 	}
 	for sourceName, destination := range map[string]string{
-		"taildnsd.exe":  paths.Daemon,
-		"tailscale.exe": paths.CLI,
-		"taildns.exe":   paths.Resolver,
+		"taildnsd.exe":    paths.Daemon,
+		"tailscale.exe":   paths.CLI,
+		"taildns.exe":     paths.Resolver,
+		"taildns-ipn.exe": paths.Tray,
 	} {
 		if err := replaceFromPayload(filepath.Join(payloadDir, sourceName), destination); err != nil {
 			return result, err
@@ -166,6 +173,22 @@ func platformInstall(payloadDir string, manifest releaseManifest, dnsEndpoint st
 		}
 	}
 	if err := verifyDNS(after); err != nil {
+		return result, err
+	}
+	if err := activateTray(paths, record.Startup); err != nil {
+		return result, err
+	}
+	if running, err := processPathRunning(paths.Tray); err != nil || !running {
+		if err != nil {
+			return result, fmt.Errorf("verifying TailDNS tray process: %w", err)
+		}
+		return result, errors.New("TailDNS tray process did not remain running after activation")
+	}
+	after, err = readIdentity(paths.CLI)
+	if err != nil {
+		return result, err
+	}
+	if err := verifyIdentityContinuity(baseline, after); err != nil {
 		return result, err
 	}
 
@@ -252,6 +275,9 @@ func platformStatus() (installResult, error) {
 	if err := verifyInstalledVersion(paths, manifest); err != nil {
 		return installResult{}, err
 	}
+	if err := verifyActiveStartup(paths, record.Startup); err != nil {
+		return installResult{}, err
+	}
 	return installResult{Action: "status", Version: record.Version, ServicePath: record.ServicePath, Identity: identity}, nil
 }
 
@@ -288,15 +314,17 @@ func resolveInstallPaths(servicePath string) (installPaths, error) {
 	}
 	dir := filepath.Dir(executable)
 	return installPaths{
-		InstallDir:  dir,
-		Daemon:      executable,
-		CLI:         filepath.Join(dir, "tailscale.exe"),
-		Resolver:    filepath.Join(dir, "taildns.exe"),
-		GUI:         filepath.Join(dir, "tailscale-ipn.exe"),
-		Wintun:      filepath.Join(dir, "wintun.dll"),
-		State:       filepath.Join(programData, "Tailscale", "server-state.conf"),
-		ProgramData: filepath.Join(programData, "TailDNS"),
-		Record:      filepath.Join(programData, "TailDNS", recordName),
+		InstallDir:      dir,
+		Daemon:          executable,
+		CLI:             filepath.Join(dir, "tailscale.exe"),
+		Resolver:        filepath.Join(dir, "taildns.exe"),
+		GUI:             filepath.Join(dir, "tailscale-ipn.exe"),
+		Tray:            filepath.Join(dir, "taildns-ipn.exe"),
+		Wintun:          filepath.Join(dir, "wintun.dll"),
+		OfficialStartup: filepath.Join(programData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "Tailscale.lnk"),
+		State:           filepath.Join(programData, "Tailscale", "server-state.conf"),
+		ProgramData:     filepath.Join(programData, "TailDNS"),
+		Record:          filepath.Join(programData, "TailDNS", recordName),
 	}, nil
 }
 
@@ -318,8 +346,8 @@ func executableFromServicePath(servicePath string) (string, error) {
 	return trimmed, nil
 }
 
-func validateInstalledBaseline(paths installPaths, upstreamVersion string) error {
-	for _, required := range []string{paths.Daemon, paths.CLI, paths.GUI, paths.Wintun, paths.State} {
+func validateInstalledBaseline(paths installPaths) error {
+	for _, required := range []string{paths.Daemon, paths.CLI, paths.Wintun, paths.State} {
 		info, err := os.Stat(required)
 		if err != nil || !info.Mode().IsRegular() {
 			return fmt.Errorf("required existing installation file is unavailable: %s", required)
@@ -329,18 +357,32 @@ func validateInstalledBaseline(paths installPaths, upstreamVersion string) error
 	if err := commandJSON(paths.CLI, &version, "version", "--json"); err != nil {
 		return err
 	}
-	if version.Short != upstreamVersion {
-		return fmt.Errorf("installed Tailscale %s does not match release base %s", version.Short, upstreamVersion)
-	}
-	if strings.Contains(version.Long, "-taildns.") {
-		return errors.New("an unmanaged TailDNS overlay is already installed; restore the official baseline before first managed installation")
+	if err := validateBaselineVersion(version); err != nil {
+		return err
 	}
 	if _, err := os.Stat(paths.Record); err == nil {
 		return errors.New("this installation is already managed by TailDNS; use the TailDNS updater for subsequent releases")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("checking existing TailDNS deployment record: %w", err)
 	}
+	legacyRecord := filepath.Join(paths.ProgramData, "deployment-v3.json")
+	if _, err := os.Stat(legacyRecord); err == nil {
+		return errors.New("a legacy TailDNS deployment is active; roll it back with its original installer before installing this release")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("checking legacy TailDNS deployment record: %w", err)
+	}
 	return nil
+}
+
+func validateBaselineVersion(version versionJSON) error {
+	if !upstreamVersionRE.MatchString(version.Short) || version.Long == "" || !commitRE.MatchString(version.GitCommit) {
+		return errors.New("installed Tailscale has no verifiable core identity")
+	}
+	return nil
+}
+
+func tailDNSRunCommand(executable string) string {
+	return `"` + strings.ReplaceAll(executable, `"`, `\"`) + `"`
 }
 
 func createDeploymentRecord(paths installPaths, servicePath, payloadDir string, manifest releaseManifest, baseline machineIdentity, prefs prefsJSON) (deploymentRecord, error) {
@@ -349,7 +391,7 @@ func createDeploymentRecord(paths installPaths, servicePath, payloadDir string, 
 		return deploymentRecord{}, err
 	}
 	record := deploymentRecord{
-		SchemaVersion:          3,
+		SchemaVersion:          4,
 		InstalledAtUTC:         time.Now().UTC().Format(time.RFC3339Nano),
 		Version:                manifest.version(),
 		UpstreamVersion:        manifest.UpstreamVersion,
@@ -363,9 +405,10 @@ func createDeploymentRecord(paths installPaths, servicePath, payloadDir string, 
 		BaselineIdentity:       baseline,
 	}
 	for source, destination := range map[string]string{
-		"taildnsd.exe":  paths.Daemon,
-		"tailscale.exe": paths.CLI,
-		"taildns.exe":   paths.Resolver,
+		"taildnsd.exe":    paths.Daemon,
+		"tailscale.exe":   paths.CLI,
+		"taildns.exe":     paths.Resolver,
+		"taildns-ipn.exe": paths.Tray,
 	} {
 		installedHash, err := hashFile(filepath.Join(payloadDir, source))
 		if err != nil {
@@ -387,15 +430,240 @@ func createDeploymentRecord(paths installPaths, servicePath, payloadDir string, 
 	}
 	for name, path := range map[string]string{"tailscale-ipn.exe": paths.GUI, "wintun.dll": paths.Wintun} {
 		hash, err := hashFile(path)
+		if name == "tailscale-ipn.exe" && errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		if err != nil {
 			return deploymentRecord{}, err
 		}
 		record.PreservedComponentHash[name] = hash
 	}
+	startup, err := captureStartupRecord(paths, recovery)
+	if err != nil {
+		return deploymentRecord{}, err
+	}
+	record.Startup = startup
 	return record, nil
 }
 
+func captureStartupRecord(paths installPaths, recovery string) (startupRecord, error) {
+	record := startupRecord{
+		OfficialLink:    fileRecord{Path: paths.OfficialStartup},
+		TailDNSRunValue: registryValueRecord{Path: runKeyPath, Name: runValueName},
+	}
+	running, err := processPathRunning(paths.GUI)
+	if err != nil {
+		return startupRecord{}, fmt.Errorf("checking official GUI process: %w", err)
+	}
+	record.OfficialGUIRunning = running
+
+	if info, err := os.Stat(paths.OfficialStartup); err == nil && info.Mode().IsRegular() {
+		record.OfficialLink.Existed = true
+		record.OfficialLink.OriginalHash, err = hashFile(paths.OfficialStartup)
+		if err != nil {
+			return startupRecord{}, err
+		}
+		record.OfficialLink.OriginalPath = filepath.Join(recovery, "Tailscale.lnk")
+		if err := copyVerified(paths.OfficialStartup, record.OfficialLink.OriginalPath, record.OfficialLink.OriginalHash); err != nil {
+			return startupRecord{}, err
+		}
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return startupRecord{}, fmt.Errorf("inspecting official GUI startup link: %w", err)
+	}
+
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE, runKeyPath, registry.QUERY_VALUE)
+	if err != nil {
+		return startupRecord{}, fmt.Errorf("opening machine startup registry: %w", err)
+	}
+	defer key.Close()
+	value, kind, err := key.GetStringValue(runValueName)
+	if err == nil {
+		record.TailDNSRunValue.Existed = true
+		record.TailDNSRunValue.Value = value
+		record.TailDNSRunValue.Kind = kind
+	} else if !errors.Is(err, registry.ErrNotExist) {
+		return startupRecord{}, fmt.Errorf("reading existing TailDNS startup value: %w", err)
+	}
+	return record, nil
+}
+
+func activateTray(paths installPaths, record startupRecord) error {
+	if err := terminateProcessesByPath(paths.GUI); err != nil {
+		return fmt.Errorf("stopping official GUI: %w", err)
+	}
+	if record.OfficialLink.Existed {
+		got, err := hashFile(record.OfficialLink.Path)
+		if err != nil || !strings.EqualFold(got, record.OfficialLink.OriginalHash) {
+			return errors.New("official GUI startup link changed after the deployment record was created")
+		}
+		if err := os.Remove(record.OfficialLink.Path); err != nil {
+			return fmt.Errorf("disabling official GUI startup: %w", err)
+		}
+	}
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE, runKeyPath, registry.SET_VALUE)
+	if err != nil {
+		return fmt.Errorf("opening machine startup registry: %w", err)
+	}
+	if err := key.SetStringValue(runValueName, tailDNSRunCommand(paths.Tray)); err != nil {
+		key.Close()
+		return fmt.Errorf("registering TailDNS tray startup: %w", err)
+	}
+	key.Close()
+	if err := winutil.StartProcessAsCurrentGUIUser(paths.Tray, nil); err != nil {
+		return fmt.Errorf("starting TailDNS tray for the interactive user: %w", err)
+	}
+	return nil
+}
+
+func restoreStartup(paths installPaths, record startupRecord) error {
+	if err := terminateProcessesByPath(paths.Tray); err != nil {
+		return fmt.Errorf("stopping TailDNS tray: %w", err)
+	}
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE, runKeyPath, registry.QUERY_VALUE|registry.SET_VALUE)
+	if err != nil {
+		return fmt.Errorf("opening machine startup registry: %w", err)
+	}
+	current, _, currentErr := key.GetStringValue(runValueName)
+	currentIsOriginal := record.TailDNSRunValue.Existed && current == record.TailDNSRunValue.Value
+	if currentErr == nil && current != tailDNSRunCommand(paths.Tray) && !currentIsOriginal {
+		key.Close()
+		return errors.New("refusing to overwrite a changed TailDNS startup value")
+	}
+	if currentErr != nil && !errors.Is(currentErr, registry.ErrNotExist) {
+		key.Close()
+		return fmt.Errorf("reading TailDNS startup value: %w", currentErr)
+	}
+	if record.TailDNSRunValue.Existed {
+		if record.TailDNSRunValue.Kind == registry.EXPAND_SZ {
+			err = key.SetExpandStringValue(runValueName, record.TailDNSRunValue.Value)
+		} else {
+			err = key.SetStringValue(runValueName, record.TailDNSRunValue.Value)
+		}
+	} else if currentErr == nil {
+		err = key.DeleteValue(runValueName)
+	}
+	key.Close()
+	if err != nil {
+		return fmt.Errorf("restoring TailDNS startup value: %w", err)
+	}
+	if record.OfficialLink.Existed {
+		if got, err := hashFile(record.OfficialLink.OriginalPath); err != nil || !strings.EqualFold(got, record.OfficialLink.OriginalHash) {
+			return errors.New("official GUI startup-link backup is unavailable or corrupt")
+		}
+		if got, err := hashFile(record.OfficialLink.Path); err == nil && !strings.EqualFold(got, record.OfficialLink.OriginalHash) {
+			return errors.New("refusing to overwrite a changed official GUI startup link")
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err := copyVerified(record.OfficialLink.OriginalPath, record.OfficialLink.Path, record.OfficialLink.OriginalHash); err != nil {
+			return err
+		}
+	}
+	if record.OfficialGUIRunning {
+		if err := winutil.StartProcessAsCurrentGUIUser(paths.GUI, nil); err != nil {
+			return fmt.Errorf("restarting official GUI after rollback: %w", err)
+		}
+	}
+	return nil
+}
+
+func verifyActiveStartup(paths installPaths, record startupRecord) error {
+	if record.OfficialLink.Existed {
+		if _, err := os.Stat(record.OfficialLink.Path); err == nil {
+			return errors.New("official GUI startup link is active during TailDNS deployment")
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE, runKeyPath, registry.QUERY_VALUE)
+	if err != nil {
+		return err
+	}
+	defer key.Close()
+	value, _, err := key.GetStringValue(runValueName)
+	if err != nil {
+		return err
+	}
+	if value != tailDNSRunCommand(paths.Tray) {
+		return errors.New("TailDNS tray startup value does not target the installed tray")
+	}
+	running, err := processPathRunning(paths.Tray)
+	if err != nil {
+		return err
+	}
+	if !running {
+		return errors.New("TailDNS tray is not running for the interactive user")
+	}
+	return nil
+}
+
+func processHandlesByPath(executable string) ([]windows.Handle, error) {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer windows.CloseHandle(snapshot)
+	wanted, err := filepath.Abs(executable)
+	if err != nil {
+		return nil, err
+	}
+	var handles []windows.Handle
+	entry := windows.ProcessEntry32{Size: uint32(unsafe.Sizeof(windows.ProcessEntry32{}))}
+	for err := windows.Process32First(snapshot, &entry); err == nil; err = windows.Process32Next(snapshot, &entry) {
+		process, openErr := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, entry.ProcessID)
+		if openErr != nil {
+			continue
+		}
+		buf := make([]uint16, windows.MAX_PATH)
+		size := uint32(len(buf))
+		queryErr := windows.QueryFullProcessImageName(process, 0, &buf[0], &size)
+		if queryErr != nil || !strings.EqualFold(filepath.Clean(windows.UTF16ToString(buf[:size])), filepath.Clean(wanted)) {
+			windows.CloseHandle(process)
+			continue
+		}
+		handles = append(handles, process)
+	}
+	return handles, nil
+}
+
+func processPathRunning(executable string) (bool, error) {
+	handles, err := processHandlesByPath(executable)
+	if err != nil {
+		return false, err
+	}
+	for _, handle := range handles {
+		windows.CloseHandle(handle)
+	}
+	return len(handles) != 0, nil
+}
+
+func terminateProcessesByPath(executable string) error {
+	handles, err := processHandlesByPath(executable)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		for _, handle := range handles {
+			windows.CloseHandle(handle)
+		}
+	}()
+	for _, handle := range handles {
+		if err := windows.TerminateProcess(handle, 0); err != nil && !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			return err
+		}
+	}
+	for _, handle := range handles {
+		if _, err := windows.WaitForSingleObject(handle, windows.INFINITE); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func restoreRecord(service *mgr.Service, paths installPaths, record deploymentRecord) error {
+	if err := terminateProcessesByPath(paths.Tray); err != nil {
+		return fmt.Errorf("stopping TailDNS tray before rollback: %w", err)
+	}
 	if err := stopService(service); err != nil {
 		return err
 	}
@@ -417,7 +685,10 @@ func restoreRecord(service *mgr.Service, paths installPaths, record deploymentRe
 	if err := waitBackend(paths.CLI); err != nil {
 		return err
 	}
-	return setAutoUpdate(paths.CLI, record.OriginalUpdateCheck, record.OriginalUpdateApply)
+	if err := setAutoUpdate(paths.CLI, record.OriginalUpdateCheck, record.OriginalUpdateApply); err != nil {
+		return err
+	}
+	return restoreStartup(paths, record.Startup)
 }
 
 func removeKnownInstalled(file fileRecord) error {
@@ -620,7 +891,7 @@ func readRecord(path string) (deploymentRecord, error) {
 	if err := dec.Decode(&record); err != nil {
 		return record, err
 	}
-	if record.SchemaVersion != 3 || record.ServicePath == "" || len(record.Files) != 3 {
+	if record.SchemaVersion != 4 || record.ServicePath == "" || len(record.Files) != 4 {
 		return record, errors.New("unsupported or incomplete deployment record")
 	}
 	return record, nil
@@ -714,12 +985,17 @@ func verifyInstalledVersion(paths installPaths, manifest releaseManifest) error 
 }
 
 func verifyPreservedComponents(paths installPaths, expected map[string]string) error {
-	for name, path := range map[string]string{"tailscale-ipn.exe": paths.GUI, "wintun.dll": paths.Wintun} {
+	pathsByName := map[string]string{"tailscale-ipn.exe": paths.GUI, "wintun.dll": paths.Wintun}
+	for name, expectedHash := range expected {
+		path, ok := pathsByName[name]
+		if !ok {
+			return fmt.Errorf("deployment record contains unknown preserved component %s", name)
+		}
 		actual, err := hashFile(path)
 		if err != nil {
 			return err
 		}
-		if !strings.EqualFold(actual, expected[name]) {
+		if !strings.EqualFold(actual, expectedHash) {
 			return fmt.Errorf("preserved component %s changed", name)
 		}
 	}

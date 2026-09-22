@@ -145,3 +145,21 @@ func TestRecommendedIsActive(t *testing.T) {
 		})
 	}
 }
+
+func TestMenuProductName(t *testing.T) {
+	if got := new(Menu).productName(); got != "Tailscale" {
+		t.Fatalf("zero-value product name = %q, want Tailscale", got)
+	}
+	if got := (&Menu{ProductName: "TailDNS"}).productName(); got != "TailDNS" {
+		t.Fatalf("custom product name = %q, want TailDNS", got)
+	}
+}
+
+func TestAccountActionsDoNotStartAnEmptySubmenuWithSeparator(t *testing.T) {
+	if accountMenuNeedsSeparator(1) {
+		t.Fatal("a single-profile account menu has no profile entries before its actions")
+	}
+	if !accountMenuNeedsSeparator(2) {
+		t.Fatal("a multi-profile account menu must separate profile entries from account actions")
+	}
+}

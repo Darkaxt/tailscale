@@ -1,6 +1,6 @@
-# TailDNS Windows companion
+# TailDNS for Windows
 
-TailDNS adds a profile-local DNS-over-HTTPS default resolver to the forked open-source daemon. The companion is an independently branded command-line frontend; it does not copy or claim to fork Tailscale's proprietary Windows GUI.
+TailDNS adds a profile-local DNS-over-HTTPS default resolver to the forked open-source daemon. The Windows package ships one matching current-core set: daemon, CLI, resolver, and an independently branded tray client. It does not copy or claim to fork Tailscale's proprietary Windows GUI.
 
 The configured endpoint replaces only the default resolver. MagicDNS and eligible more-specific split-DNS routes remain authoritative. Clearing the endpoint restores the normal Tailscale DNS selection. Windows selection is always explicit and never follows Android settings.
 
@@ -14,9 +14,10 @@ The configured endpoint replaces only the default resolver. MagicDNS and eligibl
 
 ## Supported installation
 
-Each `windows-v<official-version>+<sequence>` GitHub release contains a native
-`taildns-installer.exe`, the exact-version daemon and CLI, the resolver, and a
-signed update manifest. Extract the ZIP and run from an elevated PowerShell:
+Each `windows-v<upstream-version>+<sequence>` GitHub release contains a native
+`taildns-installer.exe`, the matching daemon, CLI, resolver and
+`taildns-ipn.exe` tray client, plus a signed update manifest. Extract the ZIP
+and run from an elevated PowerShell:
 
 ```powershell
 & .\taildns-installer.exe -action install -dns-endpoint 'https://resolver.example/dns-query'
@@ -24,19 +25,22 @@ signed update manifest. Extract the ZIP and run from an elevated PowerShell:
 
 The installer accepts only a release whose Ed25519 manifest signature matches
 the public key embedded by the trusted release job. It verifies every payload
-hash and refuses a base version other than the installed official Tailscale
-version. The installer preserves the official proprietary GUI, Wintun driver,
-service image path, node state, login, addresses, and Tailnet Lock identity. It
-backs up the replaced daemon and CLI, applies the resolver, verifies public DNS
-and MagicDNS, and rolls back automatically if activation or verification fails.
+hash. The installer may advance an existing official or TailDNS installation
+to the release's real upstream core version; it never manufactures a newer
+Tailscale version to represent a fork build. It preserves the official GUI as
+rollback material, the Wintun driver, service image path, node state, login,
+addresses, and Tailnet Lock identity. It backs up every replaced executable and
+the previous startup configuration, activates the TailDNS tray once per signed-in
+user, applies the resolver, verifies public DNS and MagicDNS, and rolls back
+automatically if activation or verification fails.
 
 This manifest signature authenticates TailDNS update metadata and payload
 hashes. It is deliberately distinct from Authenticode; TailDNS does not claim
 that its community-built executables carry Tailscale's proprietary publisher
 signature.
 
-Official Tailscale automatic application is disabled while the overlay is
-installed because it would replace only part of this exact-version set. The
+Official Tailscale automatic application is disabled while TailDNS is
+installed because it would replace only part of this matching-core set. The
 TailDNS updater is responsible for same-base releases and coordinated future
 upstream-base transitions.
 
@@ -69,8 +73,9 @@ The CLI autosaves through the backend. There is no separate save command:
 ## Rollback and restoration
 
 The managed rollback restores only the verified files recorded by the
-installer, restores the previous official update preferences, restarts the
-service, and verifies node identity continuity:
+installer, restores the previous tray startup registration and official update
+preferences, restarts the service and previous GUI when applicable, and
+verifies node identity continuity:
 
 ```powershell
 & .\taildns-installer.exe -action rollback
@@ -89,4 +94,9 @@ If the isolated daemon is still running, stop that exact process after recording
 
 ## Verification status
 
-Focused client, LocalAPI, CLI and Windows named-pipe tests pass. A Windows host test also proves that `status` and `set` against the installed unmodified daemon return an explicit incompatibility error and perform no edit. The release installer adds signed-manifest, exact-version, identity-continuity, component-preservation, DNS, and automatic-rollback gates. Device-specific evidence remains recorded in the Android fork's staged validation documents.
+Focused client, LocalAPI, CLI, tray, installer and Windows named-pipe tests form
+the release gate. An unmodified daemon returns an explicit incompatibility
+error to resolver operations and performs no edit. The release installer adds
+signed-manifest, matching-payload, identity-continuity, component-preservation,
+startup, DNS, and automatic-rollback gates. Host-specific evidence is recorded
+in the Android fork's staged validation documents.
