@@ -118,7 +118,7 @@ func main() {
 func run(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("taildns-installer", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	action := fs.String("action", "install", "install, rollback, or status")
+	action := fs.String("action", "install", "install, update, rollback, or status")
 	payload := fs.String("payload", "", "release payload directory")
 	dnsEndpoint := fs.String("dns-endpoint", "", "optional HTTPS DNS endpoint")
 	if err := fs.Parse(args); err != nil {
@@ -148,6 +148,12 @@ func run(args []string, stdout io.Writer) error {
 			return verifyErr
 		}
 		result, err = platformInstall(payloadDir, manifest, *dnsEndpoint)
+	case "update":
+		manifest, verifyErr := verifyRelease(payloadDir, updatePublicKeyBase64)
+		if verifyErr != nil {
+			return verifyErr
+		}
+		result, err = platformUpdate(payloadDir, manifest)
 	case "rollback":
 		result, err = platformRollback()
 	case "status":

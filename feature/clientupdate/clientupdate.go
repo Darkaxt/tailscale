@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"tailscale.com/clientupdate"
+	"tailscale.com/clientupdate/taildnsupdate"
 	"tailscale.com/envknob"
 	"tailscale.com/feature"
 	"tailscale.com/ipn"
@@ -112,14 +113,24 @@ func (e *extension) onBackendStateChange(newState ipn.State) {
 
 func (e *extension) onChangeProfile(profile ipn.LoginProfileView, prefs ipn.PrefsView, sameNode bool) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
+	wasEnabled := e.prefs.Valid() && e.prefs.AutoUpdate().Apply.EqualBool(true)
 	e.prefs = prefs
 	e.updateOfflineAutoUpdateLocked()
+	nowEnabled := prefs.Valid() && prefs.AutoUpdate().Apply.EqualBool(true)
+	e.mu.Unlock()
+	if strings.Contains(version.Long(), "-taildns.") && nowEnabled && !wasEnabled {
+		go func() {
+			if err := e.startAutoUpdate("TailDNS preference"); err != nil {
+				e.logf("TailDNS preference: update check failed: %v", err)
+			}
+		}()
+	}
 }
 
 func (e *extension) updateOfflineAutoUpdateLocked() {
+	tailDNS := strings.Contains(version.Long(), "-taildns.")
 	want := e.prefs.Valid() && e.prefs.AutoUpdate().Apply.EqualBool(true) &&
-		e.state != ipn.Running && e.state != ipn.Starting
+		(tailDNS || (e.state != ipn.Running && e.state != ipn.Starting))
 
 	cur := e.offlineAutoUpdateCancel != nil
 
@@ -440,6 +451,17 @@ func (e *extension) startAutoUpdate(logPrefix string) (retErr error) {
 			e.setC2NUpdateStarted(false)
 		}
 	}()
+	if strings.Contains(version.Long(), "-taildns.") {
+		go func() {
+			if err := taildnsupdate.StartLatest(context.Background(), e.logf); err != nil {
+				e.logf("%s: TailDNS update failed: %v", logPrefix, err)
+			} else {
+				e.logf("%s: TailDNS update installer started", logPrefix)
+			}
+			e.setC2NUpdateStarted(false)
+		}()
+		return nil
+	}
 
 	cmdTS, err := findCmdTailscale()
 	if err != nil {

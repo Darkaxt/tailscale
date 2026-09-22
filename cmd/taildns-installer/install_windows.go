@@ -26,6 +26,7 @@ import (
 	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
+	"tailscale.com/util/cmpver"
 	"tailscale.com/util/winutil"
 )
 
@@ -199,6 +200,121 @@ func platformInstall(payloadDir string, manifest releaseManifest, dnsEndpoint st
 		Identity:           after,
 		ResolverConfigured: dnsEndpoint != "",
 	}, nil
+}
+
+func platformUpdate(payloadDir string, manifest releaseManifest) (result installResult, retErr error) {
+	if err := expectedRuntime(); err != nil {
+		return result, err
+	}
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		return result, errors.New("update requires an elevated Administrator process")
+	}
+	manager, service, config, err := openService()
+	if err != nil {
+		return result, err
+	}
+	defer manager.Disconnect()
+	defer service.Close()
+	paths, err := resolveInstallPaths(config.BinaryPathName)
+	if err != nil {
+		return result, err
+	}
+	active, err := readRecord(paths.Record)
+	if err != nil {
+		return result, err
+	}
+	if err := validateUpdateTransition(active, manifest); err != nil {
+		return result, err
+	}
+	before, err := readIdentity(paths.CLI)
+	if err != nil {
+		return result, err
+	}
+	prefs, err := readPrefs(paths.CLI)
+	if err != nil {
+		return result, err
+	}
+	rollback, err := createDeploymentRecord(paths, config.BinaryPathName, payloadDir, manifest, before, prefs)
+	if err != nil {
+		return result, err
+	}
+	activationStarted := false
+	defer func() {
+		if retErr == nil || !activationStarted {
+			return
+		}
+		if rollbackErr := restoreRecord(service, paths, rollback); rollbackErr != nil {
+			retErr = fmt.Errorf("%w; automatic update rollback also failed: %v", retErr, rollbackErr)
+			return
+		}
+		result.RolledBack = true
+	}()
+	activationStarted = true
+	if err := terminateProcessesByPath(paths.Tray); err != nil {
+		return result, fmt.Errorf("stopping TailDNS tray for update: %w", err)
+	}
+	if err := stopService(service); err != nil {
+		return result, err
+	}
+	for sourceName, destination := range map[string]string{
+		"taildnsd.exe": paths.Daemon, "tailscale.exe": paths.CLI,
+		"taildns.exe": paths.Resolver, "taildns-ipn.exe": paths.Tray,
+	} {
+		if err := replaceFromPayload(filepath.Join(payloadDir, sourceName), destination); err != nil {
+			return result, err
+		}
+	}
+	if err := startService(service); err != nil {
+		return result, err
+	}
+	if err := waitBackend(paths.CLI); err != nil {
+		return result, err
+	}
+	if err := verifyInstalledVersion(paths, manifest); err != nil {
+		return result, err
+	}
+	after, err := readIdentity(paths.CLI)
+	if err != nil {
+		return result, err
+	}
+	if err := verifyIdentityContinuity(before, after); err != nil {
+		return result, err
+	}
+	if err := verifyPreservedComponents(paths, active.PreservedComponentHash); err != nil {
+		return result, err
+	}
+	if err := verifyDNS(after); err != nil {
+		return result, err
+	}
+	if err := activateTray(paths, rollback.Startup); err != nil {
+		return result, err
+	}
+	if err := verifyActiveStartup(paths, active.Startup); err != nil {
+		return result, err
+	}
+	active.Version = manifest.version()
+	active.UpstreamVersion = manifest.UpstreamVersion
+	active.Sequence = manifest.Sequence
+	active.CoreCommit = manifest.CoreCommit
+	for name, file := range active.Files {
+		file.InstalledHash = rollback.Files[name].InstalledHash
+		active.Files[name] = file
+	}
+	if err := writeRecord(paths.Record, active); err != nil {
+		return result, err
+	}
+	return installResult{Action: "updated", Version: manifest.version(), ServicePath: config.BinaryPathName, Identity: after}, nil
+}
+
+func validateUpdateTransition(active deploymentRecord, manifest releaseManifest) error {
+	if active.SchemaVersion != 4 || active.Sequence == 0 {
+		return errors.New("active TailDNS deployment record is invalid")
+	}
+	baseComparison := cmpver.Compare(manifest.UpstreamVersion, active.UpstreamVersion)
+	if baseComparison < 0 || (baseComparison == 0 && manifest.Sequence <= active.Sequence) {
+		return errors.New("TailDNS update is not newer than the active deployment")
+	}
+	return nil
 }
 
 func platformRollback() (installResult, error) {

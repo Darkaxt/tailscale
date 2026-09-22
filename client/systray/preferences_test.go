@@ -51,7 +51,7 @@ func TestPreferenceSnapshotPreservesWindowsControls(t *testing.T) {
 		{action: prefAllowIncoming, title: "Allow incoming connections", checked: false, available: true},
 		{action: prefUseDNS, title: "Use TailDNS settings", checked: false, available: true},
 		{action: prefUseSubnets, title: "Use Tailscale subnets", checked: true, available: true},
-		{action: prefAutoUpdate, title: "Automatically install updates (available after TailDNS updater activation)", checked: true},
+		{action: prefAutoUpdate, title: "Automatically install TailDNS updates", checked: true, available: true},
 		{action: prefUnattended, title: "Run unattended", checked: true, available: true},
 	}
 	if len(got) != len(want) {

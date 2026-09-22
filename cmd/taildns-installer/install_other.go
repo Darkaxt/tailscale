@@ -11,6 +11,10 @@ func platformInstall(string, releaseManifest, string) (installResult, error) {
 	return installResult{}, errors.New("TailDNS installer supports only Windows")
 }
 
+func platformUpdate(string, releaseManifest) (installResult, error) {
+	return installResult{}, errors.New("TailDNS installer supports only Windows")
+}
+
 func platformRollback() (installResult, error) {
 	return installResult{}, errors.New("TailDNS installer supports only Windows")
 }
