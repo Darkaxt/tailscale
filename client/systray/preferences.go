@@ -63,7 +63,7 @@ func preferenceSnapshot(prefs *ipn.Prefs) []preferenceItem {
 		{action: prefAllowIncoming, title: "Allow incoming connections", checked: !prefs.ShieldsUp, available: true},
 		{action: prefUseDNS, title: "Use TailDNS settings", checked: prefs.CorpDNS, available: true},
 		{action: prefUseSubnets, title: "Use Tailscale subnets", checked: prefs.RouteAll, available: true},
-		{action: prefAutoUpdate, title: "Automatically install updates (available after TailDNS updater activation)", checked: prefs.AutoUpdate.Apply.EqualBool(true)},
+		{action: prefAutoUpdate, title: "Automatically install TailDNS updates", checked: prefs.AutoUpdate.Apply.EqualBool(true), available: true},
 		{action: prefUnattended, title: "Run unattended", checked: prefs.ForceDaemon, available: true},
 	}
 }

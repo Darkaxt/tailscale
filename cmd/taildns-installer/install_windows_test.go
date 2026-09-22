@@ -49,6 +49,21 @@ func TestTailDNSRunCommandQuotesExecutable(t *testing.T) {
 	}
 }
 
+func TestValidateUpdateTransitionRejectsReplay(t *testing.T) {
+	active := deploymentRecord{SchemaVersion: 4, UpstreamVersion: "1.103.0", Sequence: 5}
+	if err := validateUpdateTransition(active, releaseManifest{UpstreamVersion: "1.103.0", Sequence: 6}); err != nil {
+		t.Fatalf("newer update rejected: %v", err)
+	}
+	for _, sequence := range []uint64{4, 5} {
+		if err := validateUpdateTransition(active, releaseManifest{UpstreamVersion: "1.103.0", Sequence: sequence}); err == nil {
+			t.Fatalf("sequence %d accepted", sequence)
+		}
+	}
+	if err := validateUpdateTransition(active, releaseManifest{UpstreamVersion: "1.102.9", Sequence: 99}); err == nil {
+		t.Fatal("older upstream base accepted")
+	}
+}
+
 func TestDeploymentRecordCoversMatchingTrayPayload(t *testing.T) {
 	root := t.TempDir()
 	payload := filepath.Join(root, "payload")

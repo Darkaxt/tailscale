@@ -44,7 +44,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          & .\tool\go.exe test ./client/systray ./cmd/taildns-ipn ./cmd/taildns-installer -count=1
+          & .\tool\go.exe test ./client/systray ./clientupdate/taildnsupdate ./feature/clientupdate ./cmd/taildns-ipn ./cmd/taildns-installer -count=1
       - name: Build matching-core Windows payload
         shell: pwsh
         run: |
@@ -52,9 +52,10 @@ jobs:
           $output = Join-Path $env:RUNNER_TEMP 'taildns-windows-amd64'
           New-Item -ItemType Directory -Path $output | Out-Null
           $versionFlags = "-X tailscale.com/version.longStamp=$env:LONG_VERSION -X tailscale.com/version.shortStamp=$env:UPSTREAM_VERSION -X tailscale.com/version.gitCommitStamp=$env:GITHUB_SHA"
+          $daemonFlags = "$versionFlags -X tailscale.com/clientupdate/taildnsupdate.updatePublicKeyBase64=$env:UPDATE_PUBLIC_KEY"
           & .\tool\go.exe run ./cmd/mkmanifest amd64 cmd/taildns-installer/windows-manifest.xml cmd/taildns-installer/manifest_windows_amd64.syso
           try {
-            & .\tool\go.exe build -buildvcs=false -trimpath -ldflags $versionFlags -o (Join-Path $output 'taildnsd.exe') ./cmd/tailscaled
+            & .\tool\go.exe build -buildvcs=false -trimpath -ldflags $daemonFlags -o (Join-Path $output 'taildnsd.exe') ./cmd/tailscaled
             & .\tool\go.exe build -buildvcs=false -trimpath -ldflags $versionFlags -o (Join-Path $output 'tailscale.exe') ./cmd/tailscale
             & .\tool\go.exe build -buildvcs=false -trimpath -ldflags $versionFlags -o (Join-Path $output 'taildns.exe') ./cmd/taildns
             & .\tool\go.exe build -buildvcs=false -trimpath -ldflags "$versionFlags -H windowsgui" -o (Join-Path $output 'taildns-ipn.exe') ./cmd/taildns-ipn
@@ -79,6 +80,11 @@ jobs:
           }
           if (-not $installerText.Contains($env:UPDATE_PUBLIC_KEY)) {
             throw 'Installer does not contain the configured update public key'
+          }
+          $daemonBytes = [IO.File]::ReadAllBytes((Join-Path $output 'taildnsd.exe'))
+          $daemonText = [Text.Encoding]::ASCII.GetString($daemonBytes)
+          if (-not $daemonText.Contains($env:UPDATE_PUBLIC_KEY)) {
+            throw 'Daemon does not contain the configured update public key'
           }
           Copy-Item -LiteralPath docs/taildns-windows.md -Destination (Join-Path $output 'README.md')
           Copy-Item -LiteralPath LICENSE -Destination (Join-Path $output 'TAILSCALE-CORE-LICENSE.txt')
@@ -197,7 +203,7 @@ jobs:
 
           The native installer transactionally installs one matching current-core TailDNS set: daemon, CLI, resolver, and independently implemented tray client. It preserves Wintun, node identity, login, Tailnet Lock identity, service registration, state, and the official GUI as rollback material until activation passes. Failed activation restores the verified previous binaries and startup state.
 
-          The official Tailscale updater remains disabled while this overlay is installed. TailDNS update metadata is authenticated by the separately managed Ed25519 manifest signature; this is not Authenticode code signing.
+          The TailDNS tray controls the fork-aware updater. TailDNS update metadata is authenticated by the separately managed Ed25519 manifest signature; this is not Authenticode code signing. The updater applies the matching daemon, CLI, resolver and tray as one transaction and retains the last verified set for rollback.
           EOF
           gh release create "$GITHUB_REF_NAME" release/* \
             --repo "$GITHUB_REPOSITORY" \
