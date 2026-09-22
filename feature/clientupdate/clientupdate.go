@@ -168,6 +168,10 @@ func (e *extension) DoSelfUpdate() {
 	if updateState == ipnstate.UpdateInProgress {
 		return
 	}
+	if strings.Contains(version.Long(), "-taildns.") {
+		e.doTailDNSSelfUpdate(taildnsupdate.StartLatest)
+		return
+	}
 	e.clearSelfUpdateProgress()
 	e.pushSelfUpdateProgress(ipnstate.NewUpdateProgress(ipnstate.UpdateInProgress, ""))
 	up, err := clientupdate.NewUpdater(clientupdate.Arguments{
@@ -185,6 +189,24 @@ func (e *extension) DoSelfUpdate() {
 	} else {
 		e.pushSelfUpdateProgress(ipnstate.NewUpdateProgress(ipnstate.UpdateFinished, "tailscaled did not restart; please restart Tailscale manually."))
 	}
+}
+
+func (e *extension) doTailDNSSelfUpdate(start func(context.Context, logger.Logf) error) {
+	e.clearSelfUpdateProgress()
+	e.pushSelfUpdateProgress(ipnstate.NewUpdateProgress(ipnstate.UpdateInProgress, ""))
+	if !e.trySetC2NUpdateStarted() {
+		e.pushSelfUpdateProgress(ipnstate.NewUpdateProgress(ipnstate.UpdateFailed, "TailDNS update already started"))
+		return
+	}
+	defer e.setC2NUpdateStarted(false)
+	err := start(context.Background(), func(format string, args ...any) {
+		e.pushSelfUpdateProgress(ipnstate.NewUpdateProgress(ipnstate.UpdateInProgress, fmt.Sprintf(format, args...)))
+	})
+	if err != nil {
+		e.pushSelfUpdateProgress(ipnstate.NewUpdateProgress(ipnstate.UpdateFailed, err.Error()))
+		return
+	}
+	e.pushSelfUpdateProgress(ipnstate.NewUpdateProgress(ipnstate.UpdateFinished, "TailDNS update installer started."))
 }
 
 // serveUpdateInstall sends a request to the LocalBackend to start a Tailscale
