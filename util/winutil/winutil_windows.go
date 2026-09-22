@@ -44,17 +44,60 @@ var ErrBadRegValueFormat = errors.New("registry value formatted incorrectly")
 // Usually the PID will be for explorer.exe.
 func GetDesktopPID() (uint32, error) {
 	hwnd := windows.GetShellWindow()
-	if hwnd == 0 {
+	if hwnd != 0 {
+		var pid uint32
+		windows.GetWindowThreadProcessId(hwnd, &pid)
+		if pid == 0 {
+			return 0, fmt.Errorf("invalid PID for HWND %v", hwnd)
+		}
+		return pid, nil
+	}
+	return activeConsoleDesktopPID()
+}
+
+type desktopProcess struct {
+	pid        uint32
+	sessionID  uint32
+	executable string
+}
+
+func desktopPIDForSession(sessionID uint32, processes []desktopProcess) (uint32, bool) {
+	for _, process := range processes {
+		if process.sessionID == sessionID && strings.EqualFold(process.executable, "explorer.exe") {
+			return process.pid, true
+		}
+	}
+	return 0, false
+}
+
+func activeConsoleDesktopPID() (uint32, error) {
+	sessionID := WTSGetActiveConsoleSessionId()
+	if sessionID == ^uint32(0) {
 		return 0, ErrNoShell
 	}
-
-	var pid uint32
-	windows.GetWindowThreadProcessId(hwnd, &pid)
-	if pid == 0 {
-		return 0, fmt.Errorf("invalid PID for HWND %v", hwnd)
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return 0, err
 	}
+	defer windows.CloseHandle(snapshot)
 
-	return pid, nil
+	var processes []desktopProcess
+	entry := windows.ProcessEntry32{Size: uint32(unsafe.Sizeof(windows.ProcessEntry32{}))}
+	for err := windows.Process32First(snapshot, &entry); err == nil; err = windows.Process32Next(snapshot, &entry) {
+		var processSessionID uint32
+		if windows.ProcessIdToSessionId(entry.ProcessID, &processSessionID) != nil {
+			continue
+		}
+		processes = append(processes, desktopProcess{
+			pid:        entry.ProcessID,
+			sessionID:  processSessionID,
+			executable: windows.UTF16ToString(entry.ExeFile[:]),
+		})
+	}
+	if pid, ok := desktopPIDForSession(sessionID, processes); ok {
+		return pid, nil
+	}
+	return 0, ErrNoShell
 }
 
 func getPolicyString(name string) (string, error) {
