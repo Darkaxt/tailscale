@@ -5733,7 +5733,7 @@ func (b *LocalBackend) peerAPIServicesLocked() (ret []tailcfg.Service) {
 // to advertise the running services on the host.
 type PortlistServices []tailcfg.Service
 
-func (b *LocalBackend) setPortlistServices(sl []tailcfg.Service) {
+func (b *LocalBackend) setPortlistServices(sl PortlistServices) {
 	if !buildfeatures.HasPortList { // redundant, but explicit for linker deadcode and humans
 		return
 	}
@@ -6525,6 +6525,20 @@ func (b *LocalBackend) initPeerAPIListenerLocked() {
 			// We don't care about the error here.  Not all platforms set this.
 			// If ps.listen needs it, it will check for zero values and error out.
 			tsIfIndex, _ := netmon.TailscaleInterfaceIndex()
+			if tsIfIndex == 0 {
+				// tailscaled sets the interface props at startup, but tsnet
+				// users of LocalBackend that don't run that code leave them
+				// unset. When there is a tun, derive the index from the
+				// device itself; peerapi uses it to bind its listener to
+				// the tunnel interface.
+				if tun, ok := b.sys.Tun.GetOK(); ok {
+					if name, err := tun.Name(); err == nil {
+						if iface, err := net.InterfaceByName(name); err == nil {
+							tsIfIndex = iface.Index
+						}
+					}
+				}
+			}
 
 			ln, err = ps.listen(a.Addr(), tsIfIndex)
 			if err != nil {
