@@ -18,6 +18,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/netip"
@@ -47,6 +48,7 @@ import (
 	"tailscale.com/tstest/natlab/vnet"
 	"tailscale.com/types/key"
 	"tailscale.com/util/mak"
+	"tailscale.com/util/set"
 )
 
 var (
@@ -74,9 +76,9 @@ type Env struct {
 	// are downloaded from pkgs.tailscale.com instead of compiled from the tree.
 	testVersion string
 
-	// gokrazy-specific paths
-	gokrazyBase   string // path to gokrazy base qcow2 image
-	gokrazyKernel string // path to gokrazy kernel
+	// gokrazyKernel is the path to the gokrazy kernel. It's set by
+	// ensureGokrazy with gokrazyBuildMu held.
+	gokrazyKernel string
 
 	// tailmac-specific paths (macOS VMs)
 	tailmacDir        string // path to tailmac bin/ directory containing Host.app
@@ -96,12 +98,11 @@ type Env struct {
 
 	// Shared resource initialization (sync.Once for things multiple nodes share).
 	vnetOnce      sync.Once
-	gokrazyOnce   sync.Once
 	qemuSockOnce  sync.Once
 	dgramSockOnce sync.Once
 	compileMu     sync.Mutex
-	compileOnce   map[string]*sync.Once // keyed by goos_goarch
-	imageOnce     map[string]*sync.Once // keyed by OSImage.Name
+	compileOnce   map[string]*sync.Once   // keyed by goos_goarch
+	imageOnce     map[string]func() error // keyed by OSImage.Name (cloud and gokrazy images); see prepareImageOnce
 
 	// Web UI support.
 	ctx        context.Context // cancelled when test ends
@@ -437,6 +438,12 @@ func (e *Env) AddNetwork(opts ...any) *vnet.Network {
 	return e.cfg.AddNetwork(opts...)
 }
 
+// FirstNetwork returns the first existing network. If no network exists, it
+// returns nil.
+func (e *Env) FirstNetwork() *vnet.Network {
+	return e.cfg.FirstNetwork()
+}
+
 // RegisterFile registers a file with the vnet fileserver.
 // It is served at http://files.tailscale/<path>.
 func (e *Env) RegisterFile(path string, data []byte) {
@@ -564,16 +571,7 @@ func (n *Node) LanIP(net *vnet.Network) netip.Addr {
 	return n.vnetNode.LanIP(net)
 }
 
-// DropControlTraffic sets up a blackhole for control traffic for just this
-// node on all the networks belonging to the node.
-func (n *Node) DropControlTraffic() {
-	for _, network := range n.nets {
-		network.BlackholeControlForAddr(n.LanIP(network))
-	}
-}
-
 // NodeOption types for configuring nodes.
-
 type nodeOptOS OSImage
 type nodeOptNoTailscale struct{}
 type nodeOptTailscaleSSH struct{}
@@ -1959,22 +1957,30 @@ func (e *Env) ensureCompiled(ctx context.Context, goos, goarch string) {
 // ensureImage prepares the cloud image for os and returns any error from the
 // preparation. Safe for concurrent use; only prepares once per OS name.
 func (e *Env) ensureImage(ctx context.Context, os OSImage) error {
+	return e.prepareImageOnce(os.Name, fmt.Sprintf("Prepare %s image", os.Name), func() error {
+		return ensureImage(ctx, os)
+	})
+}
+
+// prepareImageOnce runs prepare as the web UI step stepName the first time
+// it's called for the image named imgName. Every call for that image,
+// concurrent or later, returns the error from that one run, so no node
+// boots from an image whose preparation failed.
+func (e *Env) prepareImageOnce(imgName, stepName string, prepare func() error) error {
 	e.compileMu.Lock()
-	once, ok := e.imageOnce[os.Name]
+	f, ok := e.imageOnce[imgName]
 	if !ok {
-		once = new(sync.Once)
-		mak.Set(&e.imageOnce, os.Name, once)
+		f = sync.OnceValue(func() error {
+			step := e.Step(stepName)
+			step.Begin()
+			err := prepare()
+			step.End(err)
+			return err
+		})
+		mak.Set(&e.imageOnce, imgName, f)
 	}
 	e.compileMu.Unlock()
-
-	var err error
-	once.Do(func() {
-		step := e.Step(fmt.Sprintf("Prepare %s image", os.Name))
-		step.Begin()
-		err = ensureImage(ctx, os)
-		step.End(err)
-	})
-	return err
+	return f()
 }
 
 // registerBinaries registers compiled binaries with the vnet file server.
@@ -2122,43 +2128,98 @@ func (e *Env) RecvTaildropFile(ctx context.Context, n *Node) (name string, conte
 	return name, body
 }
 
-var buildGokrazy sync.Once
+var (
+	// gokrazyBuildMu serializes gokrazy image builds, which share the
+	// gokrazy directory, and guards gokrazyBuilt.
+	gokrazyBuildMu sync.Mutex
 
-// ensureGokrazy builds the gokrazy base image (once per test process) and
-// locates the kernel. The build is fast (~4s) so we always rebuild to ensure
-// the baked-in binaries (tta, tailscale, tailscaled) match the current source.
-func (e *Env) ensureGokrazy(ctx context.Context) error {
-	if e.gokrazyBase != "" {
-		return nil // already found
+	// gokrazyBuilt is the set of gokrazy image names that this process
+	// has already built successfully.
+	gokrazyBuilt set.Set[string]
+)
+
+// GokrazyImages returns the gokrazy OS images that natlab builds from
+// source: [Gokrazy] and its minimal-feature variants. It is intended for
+// tooling such as a CI prep step that wants to prebuild them.
+func GokrazyImages() []OSImage {
+	return []OSImage{Gokrazy, GokrazyExtraSmall, GokrazyNoNATTraversal, GokrazyDERPOnly}
+}
+
+// BuildGokrazyImage builds the gokrazy image img from the current source
+// tree, writing its qcow2 file into the gokrazy directory, unless this
+// process has already built it. Build output goes to os.Stdout and
+// os.Stderr. It is safe for concurrent use.
+func BuildGokrazyImage(ctx context.Context, img OSImage) error {
+	gokrazyBuildMu.Lock()
+	defer gokrazyBuildMu.Unlock()
+	return buildGokrazyImageLocked(ctx, img)
+}
+
+func buildGokrazyImageLocked(ctx context.Context, img OSImage) error {
+	if !img.IsGokrazy {
+		return fmt.Errorf("%s is not a gokrazy image", img.Name)
 	}
-
+	if gokrazyBuilt.Contains(img.Name) {
+		return nil
+	}
 	modRoot, err := findModRoot()
 	if err != nil {
 		return err
 	}
-
-	var buildErr error
-	buildGokrazy.Do(func() {
-		e.t.Logf("building gokrazy natlab image...")
-		cmd := exec.CommandContext(ctx, "make", "natlab")
-		cmd.Dir = filepath.Join(modRoot, "gokrazy")
-		cmd.Stderr = os.Stderr
-		cmd.Stdout = os.Stdout
-		if err := cmd.Run(); err != nil {
-			buildErr = fmt.Errorf("make natlab: %w", err)
-		}
-	})
-	if buildErr != nil {
-		return buildErr
+	args, _ := img.gokrazyMakeArgs()
+	if img.gokrazyKeep != nil {
+		log.Printf("building %s image (keeping only features %v)...", img.Name, img.gokrazyKeep)
+	} else {
+		log.Printf("building %s image...", img.Name)
 	}
+	cmd := exec.CommandContext(ctx, "make", args...)
+	cmd.Dir = filepath.Join(modRoot, "gokrazy")
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("make %s: %w", args[0], err)
+	}
+	gokrazyBuilt.Make()
+	gokrazyBuilt.Add(img.Name)
+	return nil
+}
 
-	e.gokrazyBase = filepath.Join(modRoot, "gokrazy/natlabapp.qcow2")
-
-	kernel, err := findKernelPath(filepath.Join(modRoot, "go.mod"))
+// ensureGokrazy builds the gokrazy image img (once per test process) and
+// locates the kernel. It returns the path to img's base qcow2 image.
+// The build is fast (~4s) so we always rebuild to ensure the baked-in
+// binaries (tta, tailscale, tailscaled) match the current source.
+// It is safe for concurrent use.
+func (e *Env) ensureGokrazy(ctx context.Context, img OSImage) (basePath string, err error) {
+	modRoot, err := findModRoot()
 	if err != nil {
-		return fmt.Errorf("finding kernel: %w", err)
+		return "", err
 	}
-	e.gokrazyKernel = kernel
+	if err := e.prepareImageOnce(img.Name, fmt.Sprintf("Build %s image", img.Name), func() error {
+		return e.buildGokrazy(ctx, modRoot, img)
+	}); err != nil {
+		return "", err
+	}
+	_, qcow2 := img.gokrazyMakeArgs()
+	return filepath.Join(modRoot, "gokrazy", qcow2), nil
+}
+
+// buildGokrazy builds the gokrazy image img, unless this process already
+// has, and sets e.gokrazyKernel.
+func (e *Env) buildGokrazy(ctx context.Context, modRoot string, img OSImage) error {
+	gokrazyBuildMu.Lock()
+	defer gokrazyBuildMu.Unlock()
+
+	if err := buildGokrazyImageLocked(ctx, img); err != nil {
+		return err
+	}
+
+	if e.gokrazyKernel == "" {
+		kernel, err := findKernelPath(filepath.Join(modRoot, "go.mod"))
+		if err != nil {
+			return fmt.Errorf("finding kernel: %w", err)
+		}
+		e.gokrazyKernel = kernel
+	}
 	return nil
 }
 
@@ -2327,11 +2388,11 @@ func (e *Env) PingExpect(from, to *Node, wantRoute PingRoute, timeout time.Durat
 		pr, err := from.agent.PingWithOpts(pingCtx, targetIP, tailcfg.PingDisco, local.PingOpts{})
 		pingCancel()
 		if err == nil && pr.Err == "" {
-			if got := classifyPing(pr); got == wantRoute {
-				e.t.Logf("Saw ping type %q", got)
+			got := classifyPing(pr)
+			e.t.Logf("Saw ping type %q", got)
+			if got == wantRoute {
 				return nil
 			} else {
-				e.t.Logf("Saw ping type %q", got)
 				lastRoute = got
 			}
 		}
@@ -2343,7 +2404,68 @@ func (e *Env) PingExpect(from, to *Node, wantRoute PingRoute, timeout time.Durat
 	return fmt.Errorf("ping route = %q, want %q (after %v)", lastRoute, wantRoute, timeout)
 }
 
+// PingSettle retries disco pings every 1 second between nodes from -> to. The
+// intention is to have the route settle into the desired state at ctx timeout,
+// making the last returned type the settled state of the connection. If the
+// connection is direct before the timeout, the method returns early.
+// If no ping has been completed, nil will be returned.
+func (e *Env) PingSettle(from, to *Node, timeout time.Duration) (*ipnstate.PingResult, error) {
+	e.t.Helper()
+	ctx, cancel := context.WithTimeout(e.t.Context(), timeout)
+	defer cancel()
+	toSt, err := to.agent.Status(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("ping: can't get %s status: %w", to.name, err)
+	}
+	if len(toSt.Self.TailscaleIPs) == 0 {
+		return nil, fmt.Errorf("ping: %s has no Tailscale IPs", to.name)
+	}
+	targetIP := toSt.Self.TailscaleIPs[0]
+	var lastRes *ipnstate.PingResult
+	n := 0
+	for ctx.Err() == nil {
+		n++
+		e.t.Logf("ping: attempt %d to %v ...", n, targetIP)
+		pingCtx, pingCancel := context.WithTimeout(ctx, 3*time.Second)
+		pr, err := from.agent.PingWithOpts(pingCtx, targetIP, tailcfg.PingDisco, local.PingOpts{})
+		pingCancel()
+		if err != nil {
+			e.t.Logf("ping: attempt %d error: %v", n, err)
+			if ctx.Err() != nil {
+				break
+			}
+			continue
+		}
+		if pr.Err != "" {
+			return nil, errors.New(pr.Err)
+		}
+		e.t.Logf("ping: attempt %d: derp=%d endpoint=%v latency=%v", n, pr.DERPRegionID, pr.Endpoint, pr.LatencySeconds)
+		// When DERP on the result is 0, we have settled onto a direct path.
+		if pr.DERPRegionID == 0 {
+			return pr, nil
+		}
+		lastRes = pr
+		select {
+		case <-ctx.Done():
+			return lastRes, nil
+		case <-time.After(time.Second):
+		}
+	}
+	if lastRes != nil {
+		return lastRes, nil
+	}
+	return nil, fmt.Errorf("ping: ping no response (ctx: %v)", ctx.Err())
+}
+
 // NumNodes returns the current number of nodes configured in the env.
-func (env *Env) NumNodes() int {
-	return len(env.nodes)
+func (e *Env) NumNodes() int {
+	return len(e.nodes)
+}
+
+// DropControlTraffic sets up a blackhole for control traffic for just this
+// node on all the networks belonging to the node.
+func (e *Env) DropControlTraffic(n *Node) {
+	for _, network := range n.nets {
+		network.BlackholeControlForAddr(n.LanIP(network))
+	}
 }

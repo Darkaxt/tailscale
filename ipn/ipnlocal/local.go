@@ -651,14 +651,18 @@ func NewLocalBackend(logf logger.Logf, logID logid.PublicID, sys *tsd.System, lo
 	}
 	b.pm.SetExtensionHost(b.extHost)
 
-	if b.unregisterSysPolicyWatch, err = b.registerSysPolicyWatch(); err != nil {
-		return nil, err
-	}
-	defer func() {
-		if err != nil {
-			b.unregisterSysPolicyWatch()
+	if buildfeatures.HasSystemPolicy {
+		if b.unregisterSysPolicyWatch, err = b.registerSysPolicyWatch(); err != nil {
+			return nil, err
 		}
-	}()
+		defer func() {
+			if err != nil {
+				b.unregisterSysPolicyWatch()
+			}
+		}()
+	} else {
+		b.unregisterSysPolicyWatch = func() {}
+	}
 
 	netMon := sys.NetMon.Get()
 	b.sockstatLogger, err = sockstatlog.NewLogger(logpolicy.LogsDir(logf), logf, logID, netMon, sys.HealthTracker.Get(), sys.Bus.Get())
@@ -715,9 +719,11 @@ func NewLocalBackend(logf logger.Logf, logID logid.PublicID, sys *tsd.System, lo
 	ec := b.Sys().Bus.Get().Client("ipnlocal.LocalBackend")
 	b.eventClient = ec
 	eventbus.SubscribeFunc(ec, b.onClientVersion)
-	eventbus.SubscribeFunc(ec, func(au controlclient.AutoUpdate) {
-		b.onTailnetDefaultAutoUpdate(au.Value)
-	})
+	if buildfeatures.HasClientUpdate {
+		eventbus.SubscribeFunc(ec, func(au controlclient.AutoUpdate) {
+			b.onTailnetDefaultAutoUpdate(au.Value)
+		})
+	}
 	eventbus.SubscribeFunc(ec, func(cd netmon.ChangeDelta) { b.linkChange(&cd) })
 	b.refreshInterfaceState(netMon)
 	if buildfeatures.HasHealth {
@@ -726,8 +732,10 @@ func NewLocalBackend(logf logger.Logf, logID logid.PublicID, sys *tsd.System, lo
 	if buildfeatures.HasPortList {
 		eventbus.SubscribeFunc(ec, b.setPortlistServices)
 	}
-	eventbus.SubscribeFunc(ec, b.onAppConnectorRouteUpdate)
-	eventbus.SubscribeFunc(ec, b.onAppConnectorStoreRoutes)
+	if buildfeatures.HasAppConnectors {
+		eventbus.SubscribeFunc(ec, b.onAppConnectorRouteUpdate)
+		eventbus.SubscribeFunc(ec, b.onAppConnectorStoreRoutes)
+	}
 	eventbus.SubscribeFunc(ec, b.onHomeDERPUpdate)
 	mConn.SetNetInfoCallback(b.setNetInfo) // TODO(tailscale/tailscale#17887): move to eventbus
 
@@ -2015,6 +2023,7 @@ func (b *LocalBackend) setControlClientStatusLocked(c controlclient.Client, st c
 	}
 
 	// Perform all reconfiguration based on the netmap here.
+	var oldPeers []tailcfg.NodeView // set below only if hasPeerChangeWatcherLocked
 	if st.NetMap != nil {
 		b.capTailnetLock = st.NetMap.HasCap(nodecap.TailnetLock)
 		b.setWebClientAtomicBoolLocked(st.NetMap.AllCaps)
@@ -2041,6 +2050,11 @@ func (b *LocalBackend) setControlClientStatusLocked(c controlclient.Client, st c
 
 		if !envknob.TKASkipSignatureCheck() {
 			b.tkaFilterNetmapLocked(st.NetMap)
+		}
+		// Snapshot the live peer set (last full netmap plus deltas) so the
+		// peer-change Notify below can report the peers this netmap drops.
+		if b.hasPeerChangeWatcherLocked() {
+			oldPeers = cn.Peers()
 		}
 		b.setNetMapLocked(st.NetMap)
 		b.updateFilterLocked(prefs.View())
@@ -2113,8 +2127,17 @@ func (b *LocalBackend) setControlClientStatusLocked(c controlclient.Client, st c
 		if b.hasPeerChangeWatcherLocked() {
 			notify.UserProfiles = st.NetMap.UserProfiles
 			notify.PeersChanged = make([]*tailcfg.Node, 0, len(st.NetMap.Peers))
+			cur := make(set.Set[tailcfg.NodeID], len(st.NetMap.Peers))
 			for _, p := range st.NetMap.Peers {
 				notify.PeersChanged = append(notify.PeersChanged, p.AsStruct())
+				cur.Add(p.ID())
+			}
+			// Watchers upsert PeersChanged, so a peer absent from a full
+			// netmap must be listed explicitly or it lingers.
+			for _, p := range oldPeers {
+				if !cur.Contains(p.ID()) {
+					notify.PeersRemoved = append(notify.PeersRemoved, p.ID())
+				}
 			}
 		}
 		b.sendLocked(notify)
@@ -3433,7 +3456,12 @@ func (b *LocalBackend) updateFilterLocked(prefs ipn.PrefsView) {
 		}
 		packetFilter = cn.PacketFilter()
 
-		if cn.unlockedNodesPermitted(packetFilter) {
+		// Peers marked UnsignedPeerAPIOnly are exempt from tailnet
+		// lock's signature checks, so make sure control didn't also
+		// grant them network access. Without tailnet lock support,
+		// all peers from control are trusted and there's nothing to
+		// check.
+		if buildfeatures.HasTailnetLock && cn.unlockedNodesPermitted(packetFilter) {
 			b.health.SetUnhealthy(invalidPacketFilterWarnable, nil)
 			packetFilter = nil
 		} else {
@@ -4575,6 +4603,10 @@ func generateInterceptTCPPortFunc(ports []uint16) func(uint16) bool {
 // efficient func for ShouldInterceptTCPPort to use, which is called on every
 // incoming packet.
 func (b *LocalBackend) setTCPPortsIntercepted(ports []uint16) {
+	if !buildfeatures.HasNetstack {
+		// Only netstack intercepts ports; see ShouldInterceptTCPPort.
+		return
+	}
 	b.shouldInterceptTCPPortAtomic.Store(generateInterceptTCPPortFunc(ports))
 }
 
@@ -5027,14 +5059,18 @@ func (b *LocalBackend) checkPrefsLocked(p *ipn.Prefs) error {
 	if err := b.checkAutoUpdatePrefsLocked(p); err != nil {
 		errs = append(errs, err)
 	}
-	if err := checkAdvertiseRoutes(p); err != nil {
-		errs = append(errs, err)
+	if buildfeatures.HasAdvertiseRoutes || buildfeatures.HasAdvertiseExitNode {
+		if err := checkAdvertiseRoutes(p); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	return errors.Join(errs...)
 }
 
 func (b *LocalBackend) checkSSHPrefsLocked(p *ipn.Prefs) error {
-	if !p.RunSSH {
+	if !buildfeatures.HasSSH || !p.RunSSH {
+		// Without SSH support, the RunSSH pref is accepted but has
+		// no effect, as it never did.
 		return nil
 	}
 	if err := featureknob.CanRunTailscaleSSH(); err != nil {
@@ -5057,6 +5093,9 @@ func (b *LocalBackend) checkSSHPrefsLocked(p *ipn.Prefs) error {
 }
 
 func (b *LocalBackend) sshOnButUnusableHealthCheckMessageLocked() (healthMessage string) {
+	if !buildfeatures.HasSSH {
+		return ""
+	}
 	if p := b.pm.CurrentPrefs(); !p.Valid() || !p.RunSSH() {
 		return ""
 	}
@@ -7128,6 +7167,9 @@ func (b *LocalBackend) ShouldExposeRemoteWebClient() bool {
 // b.mu must be held.
 func (b *LocalBackend) setWebClientAtomicBoolLocked(caps set.Set[nodecap.Cap]) {
 	syncs.RequiresMutex(&b.mu)
+	if !buildfeatures.HasWebClient {
+		return
+	}
 
 	shouldRun := !caps.Contains(nodecap.DisableWebClient)
 	wasRunning := b.webClientAtomicBool.Swap(shouldRun)
@@ -7625,7 +7667,7 @@ func (b *LocalBackend) setDebugLogsByCapabilityLocked(caps set.Set[nodecap.Cap])
 func (b *LocalBackend) setTCPPortsInterceptedFromNetmapAndPrefsLocked(prefs ipn.PrefsView) {
 	handlePorts := make([]uint16, 0, 4)
 
-	if prefs.Valid() && prefs.RunSSH() && envknob.CanSSHD() {
+	if buildfeatures.HasSSH && prefs.Valid() && prefs.RunSSH() && envknob.CanSSHD() {
 		handlePorts = append(handlePorts, 22)
 	}
 	if b.ShouldExposeRemoteWebClient() {
@@ -8390,6 +8432,9 @@ func (b *LocalBackend) SetDevStateStore(key, value string) error {
 // Tailscale IP (not a subnet router, service IP, etc) should be intercepted by
 // Tailscaled and handled in-process.
 func (b *LocalBackend) ShouldInterceptTCPPort(port uint16) bool {
+	if !buildfeatures.HasNetstack {
+		return false
+	}
 	return b.shouldInterceptTCPPortAtomic.Load()(port)
 }
 
