@@ -110,12 +110,10 @@ jobs:
         run: |
           ./tool/go run ./tstest/natlab/vmtest/cmd/natlabprep
 
-      # This also builds the minimal-feature gokrazy variants, which warms
-      # the Go build cache for their tagged tailscale and tailscaled.
-      - name: Build gokrazy VM images
+      - name: Build gokrazy VM image
         if: steps.gokrazy-cache.outputs.cache-hit != 'true'
         run: |
-          ./tool/go run ./tstest/natlab/vmtest/cmd/natlabprep --gokrazy
+          make -C gokrazy natlab
 
       # No Go source imports this module, so nothing above fetches it. Pulling
       # it here puts it in the module cache the matrix jobs restore.
@@ -130,7 +128,7 @@ jobs:
       # to the other. The env below mirrors compileBinariesForOS in vmtest.go.
       - name: Warm Go build cache
         run: |
-          ./tool/go test -c -o /dev/null ./tstest/natlab/vmtest
+          ./tool/go test -c -o /dev/null ./tstest/natlab/vmtest ./tstest/integration/nat
           for pkg in tta tailscale tailscaled; do
             GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/"$pkg"
           done
@@ -147,9 +145,9 @@ jobs:
         # single-test-per-matrix-job model. They stay runnable locally.
         run: |
           set -euo pipefail
-          exclude='^(TestGrid|TestPair|TestVnetPerf.*)$'
+          exclude='^(TestGrid|TestVnetPerf.*)$'
           tmp=$(mktemp)
-          for pkg_dir in tstest/natlab/vmtest; do
+          for pkg_dir in tstest/natlab/vmtest tstest/integration/nat; do
             pkg="./${pkg_dir}/"
             for f in "${pkg_dir}"/*_test.go; do
               [ -e "$f" ] || continue
