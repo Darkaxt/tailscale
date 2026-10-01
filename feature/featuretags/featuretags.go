@@ -4,7 +4,11 @@
 // Package featuretags is a registry of all the ts_omit-able build tags.
 package featuretags
 
-import "tailscale.com/util/set"
+import (
+	"slices"
+
+	"tailscale.com/util/set"
+)
 
 // CLI is a special feature in the [Features] map that works opposite
 // from the others: it is opt-in, rather than opt-out, having a different
@@ -60,6 +64,33 @@ func RequiredBy(ft FeatureTag) set.Set[FeatureTag] {
 		}
 	}
 	return s
+}
+
+// ExtraSmall is the set of features kept by build_dist.sh --extra-small
+// (via cmd/featuretags --extra-small), the smallest build that's still a
+// useful tailscaled. Pass it to [MinTags] to get its build tags.
+var ExtraSmall = []FeatureTag{"osrouter", "nattraversal"}
+
+// MinTags returns the sorted Go build tags for a minimal build that
+// includes only the features in keep and the features they require.
+// Every other omittable feature in [Features] gets its ts_omit_ tag, and
+// ts_include_cli is added if [CLI] is kept.
+func MinTags(keep ...FeatureTag) []string {
+	kept := set.Set[FeatureTag]{}
+	for _, ft := range keep {
+		kept.AddSet(Requires(ft))
+	}
+	var tags []string
+	if kept.Contains(CLI) {
+		tags = append(tags, "ts_include_cli")
+	}
+	for ft := range Features {
+		if ft != "" && ft.IsOmittable() && !kept.Contains(ft) {
+			tags = append(tags, ft.OmitTag())
+		}
+	}
+	slices.Sort(tags)
+	return tags
 }
 
 // featureDependsOn reports whether feature a (directly or indirectly) depends on b.
@@ -191,6 +222,7 @@ var Features = map[FeatureTag]FeatureMeta{
 	"listenrawdisco": {
 		Sym:  "ListenRawDisco",
 		Desc: "Use raw sockets for more robust disco (NAT traversal) message receiving (Linux only)",
+		Deps: []FeatureTag{"udptransport"},
 	},
 	"logtail": {
 		Sym:  "LogTail",
@@ -222,12 +254,21 @@ var Features = map[FeatureTag]FeatureMeta{
 		Desc:                 "PeerAPI server support",
 		ImplementationDetail: true,
 	},
-	"portlist":   {Sym: "PortList", Desc: "Optionally advertise listening service ports"},
-	"portmapper": {Sym: "PortMapper", Desc: "NAT-PMP/PCP/UPnP port mapping support"},
-	"posture":    {Sym: "Posture", Desc: "Device posture checking support"},
+	"portlist": {Sym: "PortList", Desc: "Optionally advertise listening service ports"},
+	"portmapper": {
+		Sym:  "PortMapper",
+		Desc: "NAT-PMP/PCP/UPnP port mapping support",
+		Deps: []FeatureTag{"nattraversal"},
+	},
+	"posture": {Sym: "Posture", Desc: "Device posture checking support"},
 	"dns": {
 		Sym:  "DNS",
 		Desc: "MagicDNS and system DNS configuration support",
+	},
+	"nattraversal": {
+		Sym:  "NATTraversal",
+		Desc: "NAT traversal: STUN, disco hole punching, and UDP peer relay client support (if omitted, direct UDP works only to peers with directly reachable endpoints)",
+		Deps: []FeatureTag{"udptransport"},
 	},
 	"netlog": {
 		Sym:  "NetLog",
@@ -301,6 +342,10 @@ var Features = map[FeatureTag]FeatureMeta{
 	"tap":         {Sym: "Tap", Desc: "Experimental Layer 2 (ethernet) support"},
 	"tpm":         {Sym: "TPM", Desc: "TPM support"},
 	"tundevstats": {Sym: "TUNDevStats", Desc: "Poll TUN device statistics (Linux only)"},
+	"udptransport": {
+		Sym:  "UDPTransport",
+		Desc: "UDP transport to peers (if omitted, all peer traffic is relayed over DERP)",
+	},
 	"unixsocketidentity": {
 		Sym:  "UnixSocketIdentity",
 		Desc: "differentiate between users accessing the LocalAPI over unix sockets (if omitted, all users have full access)",
