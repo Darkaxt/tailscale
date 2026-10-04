@@ -45,6 +45,11 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           & .\tool\go.exe test ./client/systray ./clientupdate/taildnsupdate ./feature/clientupdate ./cmd/taildns-ipn ./cmd/taildns-installer -count=1
+      - name: Test Windows captive-portal contracts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\tool\go.exe test ./net/captivedetection ./ipn/ipnlocal -run '^(TestLoginProbe|TestWindowsLogin|TestCaptivePortal|TestWindowsCaptivePortal|TestLocalDNS|TestDNSConfigForNetmap)' -count=1
       - name: Build matching-core Windows payload
         shell: pwsh
         run: |
