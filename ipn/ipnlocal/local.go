@@ -349,7 +349,9 @@ type LocalBackend struct {
 	localDNSObservationFailed bool
 	localDNSLastValidEndpoint string // diagnostic only, never selected or logged
 	localDNSLastValidProfile  ipn.ProfileID
-	capTailnetLock            bool // whether netMap contains the tailnet lock capability
+	windowsPortal             captivePortalRuntime // transient, guarded by mu
+	windowsPortalWake         chan struct{}        // monitor owns probes, never preferences
+	capTailnetLock            bool                 // whether netMap contains the tailnet lock capability
 	// hostinfo is mutated in-place while mu is held.
 	hostinfo          *tailcfg.Hostinfo      // TODO(nickkhyl): move to nodeBackend
 	nmExpiryTimer     tstime.TimerController // for updating netMap on node expiry; can be nil; TODO(nickkhyl): move to nodeBackend
@@ -1214,6 +1216,8 @@ func (b *LocalBackend) linkChange(delta *netmon.ChangeDelta) {
 	defer b.mu.Unlock()
 
 	b.interfaceState = delta.CurrentState()
+	portalChanged := b.syncWindowsCaptiveNetworkLocked()
+	b.wakeWindowsCaptivePortalLocked()
 
 	b.pauseOrResumeControlClientLocked()
 	prefs := b.pm.CurrentPrefs()
@@ -1221,7 +1225,7 @@ func (b *LocalBackend) linkChange(delta *netmon.ChangeDelta) {
 		b.refreshAutoExitNode = true
 	}
 
-	var needReconfig bool
+	needReconfig := portalChanged
 	// If the network changed and we're using an exit node and allowing LAN access, we may need to reconfigure.
 	if delta.RebindLikelyRequired && prefs.ExitNodeID() != "" && prefs.ExitNodeAllowLANAccess() {
 		b.logf("linkChange: in state %v; updating LAN routes", b.state)
@@ -1286,6 +1290,7 @@ func (b *LocalBackend) onHealthChange(change health.Change) {
 	// Update control if IP forwarding state changed
 	_, broken := state.Warnings["ip-forwarding-off"]
 	b.mu.Lock()
+	b.wakeWindowsCaptivePortalLocked()
 	if b.cc != nil {
 		b.cc.SetIPForwardingBroken(broken)
 	}
@@ -6153,6 +6158,9 @@ func (b *LocalBackend) authReconfigLocked() {
 		b.logf("[v1] authReconfig: skipping because in shutdown")
 		return
 	}
+	b.startWindowsCaptivePortalLocked()
+	b.syncWindowsCaptiveNetworkLocked()
+	b.wakeWindowsCaptivePortalLocked()
 	if b.blocked {
 		b.logf("[v1] authReconfig: blocked, skipping.")
 		return
@@ -6190,6 +6198,12 @@ func (b *LocalBackend) authReconfigLocked() {
 		}
 	}
 	dcfg := cn.dnsConfigForNetmap(dnsPrefs, b.keyExpired, cmp.Or(b.goos, runtime.GOOS))
+	portalActive := b.captivePortalActiveLocked()
+	if portalActive {
+		composeCaptivePortalDNS(dcfg, b.windowsPortal.dns)
+		prefs = captivePortalPrefs(prefs, true)
+		dohURLOK = false
+	}
 	// If the current node is an app connector, ensure the app connector machine is started
 	b.reconfigAppConnectorLocked(nm.SelfNode, prefs)
 
@@ -6274,6 +6288,7 @@ func (b *LocalBackend) authReconfigLocked() {
 	b.setDataPlanePeerRoutes()
 
 	err := b.e.Reconfig(cfg, rcfg, dcfg)
+	b.windowsPortal.applied = portalActive && (err == nil || err == wgengine.ErrNoChanges)
 	b.localDNSAppliedEndpoint = ""
 	b.localDNSAppliedProfile = ""
 	if (err == nil || err == wgengine.ErrNoChanges) && dcfg != nil && len(dcfg.DefaultResolvers) == 1 && dcfg.DefaultResolvers[0].LocalOverride {

@@ -465,6 +465,9 @@ func (menu *Menu) rebuild() {
 				state = "Applied: " + menu.localDNS.Endpoint
 			}
 		}
+		if menu.localDNS.CaptivePortal {
+			state = menu.localDNS.Reason
+		}
 		statusItem := menu.localDNSMenu.AddSubMenuItem(state, menu.localDNS.Reason)
 		statusItem.Disable()
 		apply := menu.localDNSMenu.AddSubMenuItem("Use HTTPS endpoint from clipboard", "")
@@ -785,6 +788,11 @@ func (menu *Menu) watchIPNBusInner() error {
 				rebuild = true
 			}
 			if n.Prefs != nil {
+				rebuild = true
+			}
+			if n.Health != nil {
+				// Temporary portal mode changes effective DNS without editing
+				// preferences. Refresh its LocalAPI status on health transitions.
 				rebuild = true
 			}
 			if n.Policy != nil {

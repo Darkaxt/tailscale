@@ -20,6 +20,7 @@ type LocalDNSStatus struct {
 	Configured     bool
 	Endpoint       string
 	Applied        bool
+	CaptivePortal  bool // temporary Windows DNS/routing exception, never persisted
 	Reason         string
 	FollowAndroid  bool
 	ManualEndpoint string

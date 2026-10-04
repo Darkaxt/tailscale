@@ -14,7 +14,7 @@ import (
 
 // setSocketInterfaceIndex sets the IP_BOUND_IF socket option on the given RawConn.
 // This forces the socket to use the given interface.
-func setSocketInterfaceIndex(c syscall.RawConn, ifIndex int, logf logger.Logf) error {
+func setSocketInterfaceIndex(c syscall.RawConn, ifIndex int, _ string, logf logger.Logf) error {
 	return c.Control((func(fd uintptr) {
 		err := unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_BOUND_IF, ifIndex)
 		if err != nil {

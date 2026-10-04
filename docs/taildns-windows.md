@@ -4,6 +4,23 @@ TailDNS adds a profile-local DNS-over-HTTPS default resolver to the forked open-
 
 The configured endpoint replaces only the default resolver. MagicDNS and eligible more-specific split-DNS routes remain authoritative. Clearing the endpoint restores the normal Tailscale DNS selection. Windows selection is always explicit and never follows Android settings.
 
+## Hotel Wi-Fi / captive portals
+
+The Windows daemon detects login redirects using DNS-independent HTTP probes
+bound to the physical default interface. A confirmed portal enables temporary
+**Wi-Fi login mode**: default queries use that network's DNS, while eligible
+MagicDNS and specific routes remain intact. Selected exit-node routing is paused
+until independent probes validate the same network. Saved resolver/exit-node
+preferences are not changed. During login, local DNS is plaintext and ordinary
+internet traffic can go directly over Wi-Fi; the tray and health state disclose
+this exception. DNS errors, HTTP errors and failed probes alone never enable it.
+Managed DNS/exit-node policies are not bypassed. A different network/profile or
+disconnect invalidates the exception. No public fallback is added.
+
+This currently monitors physical IPv4 default networks, including dual-stack
+networks. IPv6-only portals and real hotel authentication remain unverified.
+See the [authoritative portal specification and evidence](windows-captive-portal.md).
+
 ## Safety boundary
 
 - `taildns.exe` talks to the daemon's authenticated LocalAPI over its named pipe.

@@ -105,6 +105,7 @@ func (b *LocalBackend) LocalDNSStatus() ipn.LocalDNSStatus {
 	s := ipn.LocalDNSStatus{ProfileID: b.pm.CurrentProfile().ID(), Configured: p.LocalDNSOverride(), Endpoint: p.LocalDNSResolver()}
 	s.FollowAndroid = p.LocalDNSFollowAndroid()
 	s.ManualEndpoint = p.LocalDNSResolver()
+	s.CaptivePortal = b.captivePortalActiveLocked()
 	var sourceErr error
 	if s.Configured && s.FollowAndroid {
 		s.Endpoint, s.SystemMode, sourceErr = b.localDNSPlatformEndpointLocked()
@@ -113,6 +114,12 @@ func (b *LocalBackend) LocalDNSStatus() ipn.LocalDNSStatus {
 		}
 	}
 	switch {
+	case s.CaptivePortal:
+		if b.windowsPortal.applied {
+			s.Reason = "Wi-Fi login mode: local network DNS and direct internet routing; saved settings will resume after validation"
+		} else {
+			s.Reason = "Wi-Fi login mode requested; temporary DNS/routing configuration not applied"
+		}
 	case !s.Configured:
 		s.Reason = "Using Tailscale DNS selection"
 	case !p.CorpDNS():
