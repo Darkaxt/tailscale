@@ -6197,7 +6197,11 @@ func (b *LocalBackend) authReconfigLocked() {
 			dnsPrefs = p.View()
 		}
 	}
-	dcfg := cn.dnsConfigForNetmap(dnsPrefs, b.keyExpired, cmp.Or(b.goos, runtime.GOOS))
+	var extraDNSRoutes map[string][]*dnstype.Resolver
+	if f, ok := b.extHost.hooks.ExtraDNSRoutes.GetOk(); ok {
+		extraDNSRoutes = f()
+	}
+	dcfg := cn.dnsConfigForNetmap(dnsPrefs, b.keyExpired, cmp.Or(b.goos, runtime.GOOS), extraDNSRoutes)
 	portalActive := b.captivePortalActiveLocked()
 	if portalActive {
 		composeCaptivePortalDNS(dcfg, b.windowsPortal.dns)

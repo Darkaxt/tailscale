@@ -29,7 +29,7 @@ func TestCaptivePortalDNSAndRoutingAreTemporary(t *testing.T) {
 		t.Fatal("exit routing not paused")
 	}
 	nm := &netmap.NetworkMap{DNS: tailcfg.DNSConfig{Resolvers: []*dnstype.Resolver{{Addr: "9.9.9.9"}}, Routes: map[string][]*dnstype.Resolver{".": {{Addr: "8.8.8.8"}}, "private.example.": {{Addr: "100.64.0.2"}}, "local.example.": nil}}}
-	cfg := dnsConfigForNetmap(nm, nil, p.View(), false, t.Logf, "windows")
+	cfg := dnsConfigForNetmap(nm, nil, p.View(), false, t.Logf, "windows", nil)
 	dns := []netip.Addr{netip.MustParseAddr("192.168.200.1")}
 	composeCaptivePortalDNS(cfg, dns)
 	if !reflect.DeepEqual(cfg.DefaultResolvers, []*dnstype.Resolver{{Addr: "192.168.200.1"}}) {
@@ -44,10 +44,14 @@ func TestCaptivePortalDNSAndRoutingAreTemporary(t *testing.T) {
 	// No exit node in this case allows verification of an eligible split route.
 	plain := p.Clone()
 	plain.ExitNodeID = ""
-	cfg = dnsConfigForNetmap(nm, nil, plain.View(), false, t.Logf, "windows")
+	extraRoutes := map[string][]*dnstype.Resolver{"connector.example.": {{Addr: "100.64.0.3"}}}
+	cfg = dnsConfigForNetmap(nm, nil, plain.View(), false, t.Logf, "windows", extraRoutes)
 	composeCaptivePortalDNS(cfg, dns)
 	if !reflect.DeepEqual(cfg.Routes["private.example."], nm.DNS.Routes["private.example."]) {
 		t.Fatal("split route changed")
+	}
+	if !reflect.DeepEqual(cfg.Routes["connector.example."], extraRoutes["connector.example."]) {
+		t.Fatal("extension split route changed during captive portal login")
 	}
 	after, _ := json.Marshal(p)
 	if string(after) != string(before) {
@@ -57,7 +61,7 @@ func TestCaptivePortalDNSAndRoutingAreTemporary(t *testing.T) {
 	if restored.ExitNodeID() != p.ExitNodeID {
 		t.Fatal("selected exit node not restored")
 	}
-	cfg = dnsConfigForNetmap(nm, nil, restored, false, t.Logf, "windows")
+	cfg = dnsConfigForNetmap(nm, nil, restored, false, t.Logf, "windows", nil)
 	if len(cfg.DefaultResolvers) != 1 || cfg.DefaultResolvers[0].Addr != p.LocalDNSResolver || !cfg.DefaultResolvers[0].LocalOverride {
 		t.Fatal("custom DoH not restored")
 	}

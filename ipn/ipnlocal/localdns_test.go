@@ -35,7 +35,13 @@ func TestLocalDNSDefaultOverride(t *testing.T) {
 		Domains: []string{"private.example"},
 	}}
 	before, _ := json.Marshal(nm)
-	got := dnsConfigForNetmap(nm, nil, prefs.View(), false, t.Logf, "android")
+	extraRoutes := map[string][]*dnstype.Resolver{
+		"connector.example.": {{Addr: "100.64.0.3"}},
+		"blocked.example.":   nil,
+		".":                  {{Addr: "9.9.9.9"}},
+	}
+	extraBefore, _ := json.Marshal(extraRoutes)
+	got := dnsConfigForNetmap(nm, nil, prefs.View(), false, t.Logf, "android", extraRoutes)
 	if want := []*dnstype.Resolver{{Addr: endpoint, LocalOverride: true}}; !reflect.DeepEqual(got.DefaultResolvers, want) {
 		t.Errorf("default resolver = %v; want selected endpoint", got.DefaultResolvers)
 	}
@@ -48,18 +54,28 @@ func TestLocalDNSDefaultOverride(t *testing.T) {
 	if route, ok := got.Routes["local.example."]; !ok || len(route) != 0 {
 		t.Error("authoritative empty route lost")
 	}
+	if !reflect.DeepEqual(got.Routes["connector.example."], extraRoutes["connector.example."]) {
+		t.Error("extension split DNS route lost")
+	}
+	if route, ok := got.Routes["blocked.example."]; !ok || len(route) != 0 {
+		t.Error("extension authoritative empty route lost")
+	}
+	extraAfter, _ := json.Marshal(extraRoutes)
+	if string(extraBefore) != string(extraAfter) {
+		t.Error("extension routes mutated")
+	}
 	after, _ := json.Marshal(nm)
 	if string(before) != string(after) {
 		t.Error("source netmap mutated")
 	}
-	if got := dnsConfigForNetmap(nil, nil, prefs.View(), false, t.Logf, "android"); got != nil {
+	if got := dnsConfigForNetmap(nil, nil, prefs.View(), false, t.Logf, "android", nil); got != nil {
 		t.Error("missing netmap must remain unconfigured")
 	}
-	if got := dnsConfigForNetmap(nm, nil, prefs.View(), true, t.Logf, "android"); len(got.DefaultResolvers) != 0 {
+	if got := dnsConfigForNetmap(nm, nil, prefs.View(), true, t.Logf, "android", nil); len(got.DefaultResolvers) != 0 {
 		t.Error("expired key must not install override")
 	}
 	prefs.CorpDNS = false
-	if got := dnsConfigForNetmap(nm, nil, prefs.View(), false, t.Logf, "android"); len(got.DefaultResolvers) != 0 {
+	if got := dnsConfigForNetmap(nm, nil, prefs.View(), false, t.Logf, "android", nil); len(got.DefaultResolvers) != 0 {
 		t.Error("accept-DNS off must not install override")
 	}
 }
