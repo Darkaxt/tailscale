@@ -20,6 +20,7 @@ import (
 	"tailscale.com/net/captivedetection"
 	"tailscale.com/net/dns"
 	"tailscale.com/tailcfg"
+	"tailscale.com/types/dnstype"
 	"tailscale.com/types/key"
 	"tailscale.com/types/persist"
 	"tailscale.com/wgengine"
@@ -82,6 +83,12 @@ func TestWindowsCaptivePortalRealEngineTransition(t *testing.T) {
 	}
 	recorded := &portalRecordingEngine{Engine: b.e}
 	b.e = recorded
+	extraRoutes := map[string][]*dnstype.Resolver{
+		"connector.example.": {{Addr: "100.64.0.3", UseWithExitNode: true}},
+	}
+	t.Cleanup(b.extHost.hooks.ExtraDNSRoutes.SetForTest(func() map[string][]*dnstype.Resolver {
+		return extraRoutes
+	}))
 	b.mu.Lock()
 	b.syncWindowsCaptiveNetworkLocked()
 	b.mu.Unlock()
@@ -124,6 +131,9 @@ func TestWindowsCaptivePortalRealEngineTransition(t *testing.T) {
 	if !b.windowsPortal.applied || recorded.dns.DefaultResolvers[0].Addr != "192.168.200.1" {
 		t.Fatal("hotel DNS did not reach real engine")
 	}
+	if !reflect.DeepEqual(recorded.dns.Routes["connector.example."], extraRoutes["connector.example."]) {
+		t.Fatal("extension split DNS did not reach real engine during login")
+	}
 	for _, r := range recorded.routes.Routes {
 		if r.Bits() == 0 {
 			t.Fatal("exit default route still installed")
@@ -143,6 +153,9 @@ func TestWindowsCaptivePortalRealEngineTransition(t *testing.T) {
 	b.mu.Unlock()
 	if b.localDNSAppliedEndpoint != prefs.LocalDNSResolver {
 		t.Fatal("custom DNS not reapplied")
+	}
+	if !reflect.DeepEqual(recorded.dns.Routes["connector.example."], extraRoutes["connector.example."]) {
+		t.Fatal("extension split DNS did not reach real engine after restoration")
 	}
 	defaults := 0
 	for _, r := range recorded.routes.Routes {
