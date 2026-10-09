@@ -485,12 +485,12 @@ func (n *network) acceptTCP(r *tcp.ForwarderRequest) {
 			return
 		}
 	}
-	if destPort == 443 && fakeLogCatcher.Match(destIP) {
+	if (destPort == 443 || destPort == 80) && fakeLogCatcher.Match(destIP) {
 		r.Complete(false)
 		tc := gonet.NewTCPConn(&wq, ep)
 		context.AfterFunc(n.s.shutdownCtx, func() { tc.SetDeadline(time.Now()) })
 		n.s.wg.Go(func() {
-			n.serveLogCatcherConn(clientRemoteIP, tc)
+			n.serveLogCatcherConn(clientRemoteIP, tc, destPort == 443)
 		})
 		return
 	}
@@ -557,15 +557,18 @@ func (n *network) acceptTCP(r *tcp.ForwarderRequest) {
 	}
 }
 
-// serveLogCatchConn serves a TCP connection to "log.tailscale.com", speaking the
-// logtail/logcatcher protocol.
+// serveLogCatcherConn serves a TCP connection to "log.tailscale.com", speaking
+// the logtail/logcatcher protocol.
 //
-// We terminate TLS with an arbitrary cert; the client is configured to not
-// validate TLS certs for this hostname when running under these integration
-// tests.
-func (n *network) serveLogCatcherConn(clientRemoteIP netip.Addr, c net.Conn) {
-	tlsConfig := n.s.derps[0].tlsConfig // self-signed (stealing DERP's); test client configure to not check
-	tlsConn := tls.Server(c, tlsConfig)
+// With useTLS, it terminates TLS with an arbitrary cert; gokrazy guests are
+// built to not validate TLS certs for this hostname. Other guests cannot
+// trust that cert, so they are pointed at the plain-HTTP port instead via
+// TS_LOG_TARGET.
+func (n *network) serveLogCatcherConn(clientRemoteIP netip.Addr, c net.Conn, useTLS bool) {
+	if useTLS {
+		tlsConfig := n.s.derps[0].tlsConfig // self-signed (stealing DERP's)
+		c = tls.Server(c, tlsConfig)
+	}
 	var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		all, _ := io.ReadAll(r.Body)
 		if r.Header.Get("Content-Encoding") == "zstd" {
@@ -599,7 +602,7 @@ func (n *network) serveLogCatcherConn(clientRemoteIP netip.Addr, c net.Conn) {
 		}
 	})
 	hs := &http.Server{Handler: handler}
-	hs.Serve(netutil.NewOneConnListener(tlsConn, nil))
+	hs.Serve(netutil.NewOneConnListener(c, nil))
 }
 
 type EthernetPacket struct {
@@ -2569,6 +2572,10 @@ func (s *Server) createDNSResponse(pkt gopacket.Packet) ([]byte, error) {
 		}
 
 		if toSplitDNS {
+			if string(q.Name) == SplitDNSRefusedName {
+				response.ResponseCode = layers.DNSResponseCodeRefused
+				continue
+			}
 			// The secondary server serves only its own zone, and only A records.
 			if addr, ok := splitDNSZone[string(q.Name)]; ok && q.Type == layers.DNSTypeA {
 				response.ANCount++
@@ -2923,7 +2930,7 @@ func (s *Server) addIdleAgentConn(ac *agentConn) {
 	}
 }
 
-func (s *Server) takeAgentConn(ctx context.Context, n *node) (_ *agentConn, ok bool) {
+func (s *Server) takeAgentConn(ctx context.Context, n *node) (*agentConn, error) {
 	const debug = false
 	// stuckThreshold is how long we wait before deciding the agent is slow
 	// enough to warrant a log line. Below this we stay quiet because, in
@@ -2938,7 +2945,7 @@ func (s *Server) takeAgentConn(ctx context.Context, n *node) (_ *agentConn, ok b
 			if debug {
 				log.Printf("takeAgentConn: got agent conn for %v", n.mac)
 			}
-			return ac, true
+			return ac, nil
 		}
 		if debug && miss > 0 {
 			log.Printf("takeAgentConnOne: missed %d times for %v", miss, n.mac)
@@ -2957,7 +2964,9 @@ func (s *Server) takeAgentConn(ctx context.Context, n *node) (_ *agentConn, ok b
 		}
 		select {
 		case <-ctx.Done():
-			return nil, false
+			return nil, ctx.Err()
+		case <-s.shutdownCtx.Done():
+			return nil, errors.New("takeAgentConn: server shut down while waiting for agent conn")
 		case <-ready:
 		case <-time.After(time.Second):
 			// Try again regularly anyway, in case we have multiple clients
@@ -3002,9 +3011,9 @@ func (s *Server) NodeAgentDialer(n *Node) netx.DialFunc {
 		return d
 	}
 	d := func(ctx context.Context, network, addr string) (net.Conn, error) {
-		ac, ok := s.takeAgentConn(ctx, n.n)
-		if !ok {
-			return nil, ctx.Err()
+		ac, err := s.takeAgentConn(ctx, n.n)
+		if err != nil {
+			return nil, err
 		}
 		return ac.tc, nil
 	}

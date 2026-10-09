@@ -58,8 +58,6 @@ func (c *client) transitIPForMagicIP(magicIP netip.Addr) (netip.Addr, bool) {
 // but conn25 uses link-local addresses for transit IPs.
 // Let the filter know if this is one of our addresses and should be allowed.
 func (c *client) linkLocalAllow(p packet.Parsed) (bool, string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	ok := c.isKnownTransitIP(p.Dst.Addr())
 	if ok {
 		return true, packetFilterAllowReason
@@ -68,6 +66,8 @@ func (c *client) linkLocalAllow(p packet.Parsed) (bool, string) {
 }
 
 func (c *client) isKnownTransitIP(tip netip.Addr) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	_, ok := c.assignments.lookupByTransitIP(tip)
 	return ok
 }
@@ -182,11 +182,12 @@ func (c *client) addTransitIPForConnector(tip netip.Addr, conn tailcfg.NodeView)
 	if conn.Key().IsZero() {
 		return fmt.Errorf("node with stable ID %q does not have a key", conn.StableID())
 	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	return c.insertTransitConnMapping(tip, conn.Key())
 }
+
+// errQueueFull is returned when the address assignment send queue is full and
+// the assignment was dropped. It's backpressure, not a hard failure.
+var errQueueFull = errors.New("queue full")
 
 func (c *client) enqueueAddressAssignment(addrs *addrs) error {
 	select {
@@ -196,7 +197,7 @@ func (c *client) enqueueAddressAssignment(addrs *addrs) error {
 		return nil
 	default:
 		c.logf("address assignment queue full, dropping transit assignment for %v", addrs.domain)
-		return errors.New("queue full")
+		return errQueueFull
 	}
 }
 
@@ -311,6 +312,8 @@ func (as addrs) is6() bool {
 // for the provided transitIP (as a prefix).
 // The provided transitIP must already be present in the byTransitIP map.
 func (c *client) insertTransitConnMapping(tip netip.Addr, connKey key.NodePublic) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if _, ok := c.assignments.lookupByTransitIP(tip); !ok {
 		return errors.New("transit IP is not already known")
 	}
@@ -341,6 +344,8 @@ func (c *client) lookupTransitIPsByConnKey(k key.NodePublic) ([]netip.Prefix, bo
 // mapping does not exist on its end. If a mapping is not found on the client
 // either, this is a no-op.
 func (c *client) resendTransitIPMapping(transitIP netip.Addr) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	mapping, ok := c.assignments.lookupByTransitIP(transitIP)
 	if !ok {
 		// We have no mappings for this transit IP, so nothing to resend.
