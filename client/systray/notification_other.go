@@ -1,7 +1,7 @@
 // Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
-//go:build !linux && (cgo || !darwin)
+//go:build !linux && !windows && (cgo || !darwin)
 
 package systray
 

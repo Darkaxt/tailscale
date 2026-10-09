@@ -21,6 +21,19 @@ This currently monitors physical IPv4 default networks, including dual-stack
 networks. IPv6-only portals and real hotel authentication remain unverified.
 See the [authoritative portal specification and evidence](windows-captive-portal.md).
 
+## Taildrop
+
+The Windows tray saves completed Taildrop files automatically into the current
+user's Downloads folder (including redirected folders). Files waiting before
+startup are recovered too. Existing files are never overwritten: conflicts get
+numbered names. Received files retain Internet quarantine and are never opened
+automatically. The tray submits a native Windows arrival notification; Windows
+notification/quiet-time policy can suppress its display.
+
+Use **Taildrop > Open Downloads** to find received files, or **Receive pending
+files** to retry a reported failure. An unsuccessful copy stays in the daemon
+inbox. See the [receive and delivery specification](windows-taildrop.md).
+
 ## Safety boundary
 
 - `taildns.exe` talks to the daemon's authenticated LocalAPI over its named pipe.

@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -127,7 +128,10 @@ type Menu struct {
 	localDNSApplyCh   chan string
 	localDNSDisableCh chan struct{}
 
-	eventCancel context.CancelFunc // cancel eventLoop
+	eventCancel   context.CancelFunc // cancel eventLoop
+	taildropCh    chan struct{}      // serialized Windows receiver; never tied to a menu rebuild
+	taildropRetry atomic.Bool
+	taildropDone  chan struct{}
 
 	notificationIcon *os.File // icon used for desktop notifications
 }
@@ -160,6 +164,7 @@ func (menu *Menu) init() {
 	menu.resetCh = make(chan struct{})
 	menu.localDNSApplyCh = make(chan string)
 	menu.localDNSDisableCh = make(chan struct{})
+	menu.taildropCh = make(chan struct{}, 1)
 
 	// dbus wants a file path for notification icons, so copy to a temp file.
 	menu.notificationIcon, _ = os.CreateTemp("", "tailscale-systray.png")
@@ -217,6 +222,7 @@ See https://tailscale.com/kb/1597/linux-systray for more information.`)
 	setAppIcon(disconnected)
 
 	menu.rebuild()
+	menu.startTaildrop()
 
 	menu.mu.Lock()
 	if menu.readonly {
@@ -499,6 +505,7 @@ func (menu *Menu) rebuild() {
 		}
 	}
 
+	menu.addTaildropMenu(ctx)
 	menu.more = systray.AddMenuItem("More settings", "")
 	if menu.status != nil && menu.status.BackendState == "Running" {
 		// web client is only available if backend is running
@@ -764,6 +771,7 @@ func (menu *Menu) watchIPNBusInner() error {
 		return fmt.Errorf("watching ipn bus: %w", err)
 	}
 	defer watcher.Close()
+	menu.requestTaildrop(true) // also recover files pending before startup/reconnect
 	for {
 		select {
 		case <-menu.bgCtx.Done():
@@ -772,6 +780,9 @@ func (menu *Menu) watchIPNBusInner() error {
 			n, err := watcher.Next()
 			if err != nil {
 				return fmt.Errorf("ipnbus error: %w", err)
+			}
+			if n.FilesWaiting != nil {
+				menu.requestTaildrop(false)
 			}
 			if url := n.BrowseToURL; url != nil {
 				// Avoid opening the browser when running as root, just in case.
@@ -1102,5 +1113,6 @@ func (menu *Menu) onExit() {
 		menu.eventCancel()
 	}
 
+	menu.stopTaildrop()
 	os.Remove(menu.notificationIcon.Name())
 }
