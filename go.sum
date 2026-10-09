@@ -1134,8 +1134,8 @@ github.com/tailscale/golang-x-crypto v0.0.0-20260720160339-c86ca1284b96 h1:m9EAs
 github.com/tailscale/golang-x-crypto v0.0.0-20260720160339-c86ca1284b96/go.mod h1:NC3xRCu4UR+m4n6ix8b6oLLbHa820Y0StbOQEdWTDo0=
 github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f h1:9hiVElpCmKzsBKQHkBqZ8LGzt82iLfM8egxr4sew+Ys=
 github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f/go.mod h1:8/zr1Tv0+cKpVtGCEB/7YfRXr2TszsMxMXLaT8YuBgU=
-github.com/tailscale/mkctr v0.0.0-20260902181255-cbad597122da h1:xE1TaygKZy8774JrEv1il4jOwGFcFjbnAsTmkxi73rc=
-github.com/tailscale/mkctr v0.0.0-20260902181255-cbad597122da/go.mod h1:4st7fy3NTWcWsQdOC69JcHK4UXnncgcxSOvSR8aD8a0=
+github.com/tailscale/mkctr v0.0.0-20261007195620-6c992949fa64 h1:fINF8B1T0K7137rE60MitDMcZSSRFb+vY6y4EcNBaZI=
+github.com/tailscale/mkctr v0.0.0-20261007195620-6c992949fa64/go.mod h1:4st7fy3NTWcWsQdOC69JcHK4UXnncgcxSOvSR8aD8a0=
 github.com/tailscale/netlink v1.1.1-0.20240822203006-4d49adab4de7 h1:uFsXVBE9Qr4ZoF094vE6iYTLDl0qCiKzYXlL6UeWObU=
 github.com/tailscale/netlink v1.1.1-0.20240822203006-4d49adab4de7/go.mod h1:NzVQi3Mleb+qzq8VmcWpSkcSYxXIg0DkI6XDzpVkhJ0=
 github.com/tailscale/peercred v0.0.0-20250107143737-35a0c7bd7edc h1:24heQPtnFR+yfntqhI3oAu9i27nEojcQ4NuBQOo5ZFA=
@@ -1152,8 +1152,8 @@ github.com/tailscale/web-client-prebuilt v0.0.0-20260917222731-e0ed2d0d0fea h1:a
 github.com/tailscale/web-client-prebuilt v0.0.0-20260917222731-e0ed2d0d0fea/go.mod h1:agQPE6y6ldqCOui2gkIh7ZMztTkIQKH049tv8siLuNQ=
 github.com/tailscale/wf v0.0.0-20240214030419-6fbb0a674ee6 h1:l10Gi6w9jxvinoiq15g8OToDdASBni4CyJOdHY1Hr8M=
 github.com/tailscale/wf v0.0.0-20240214030419-6fbb0a674ee6/go.mod h1:ZXRML051h7o4OcI0d3AaILDIad/Xw0IkXaHM17dic1Y=
-github.com/tailscale/wireguard-go v0.0.0-20260928213032-417aef361226 h1:v3Lpj2iHPWQDqeCwemQPz4fWweIEMLqBkwJqCjRyJQc=
-github.com/tailscale/wireguard-go v0.0.0-20260928213032-417aef361226/go.mod h1:rUelGmuK4UnSJYM5gl5Mknp6YbwwcL8+VAPMhNYe+jg=
+github.com/tailscale/wireguard-go v0.0.0-20260928213353-e61b6b78110b h1:roJhpZBsUsZayIDsfSSrgGKUNJjOPXXs1Ul/C/z7C0g=
+github.com/tailscale/wireguard-go v0.0.0-20260928213353-e61b6b78110b/go.mod h1:rUelGmuK4UnSJYM5gl5Mknp6YbwwcL8+VAPMhNYe+jg=
 github.com/tailscale/xnet v0.0.0-20240729143630-8497ac4dab2e h1:zOGKqN5D5hHhiYUp091JqK7DPCqSARyUfduhGUY8Bek=
 github.com/tailscale/xnet v0.0.0-20240729143630-8497ac4dab2e/go.mod h1:orPd6JZXXRyuDusYilywte7k094d7dycXXU5YnWsrwg=
 github.com/tc-hib/winres v0.3.1 h1:CwRjEGrKdbi5CvZ4ID+iyVhgyfatxFoizjPhzez9Io4=
