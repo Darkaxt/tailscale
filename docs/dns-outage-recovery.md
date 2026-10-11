@@ -55,8 +55,43 @@ authoritative; this revision does not invent a new blackhole-detection deadline.
 | Stage | Status | Criteria | Evidence / remaining |
 | --- | --- | --- | --- |
 | 1. Resolver recovery | COMPLETE | O1-O3; O4 health lifecycle | Red test reproduced HTTP 503/connection failure. Focused resolver, transport and health checks pass under the race detector. Real Cloudflare HTTPS recovery passed after injected 503. Negative answers, private/authoritative names, split/explicit routes, cancellation, both-fail, same-provider protection, reconfiguration and return to primary verified. |
-| 2. Client integration | ACTIVE | O4 status; O5 Android pin/native and Windows compatibility | Core status disclosure, exact Android pin/native and Windows build verification remain. |
-| 3. Final verification and commit | NOT STARTED | O1-O5 reconciliation | Review affected package results, provenance and cleanup; commit completed scope. |
+| 2. Client integration | COMPLETE | O4 status; O5 Android pin/native and Windows compatibility | Status disclosure regression passes; LocalDNS, DNS manager, CLI and tray checks pass. Windows daemon/CLI/tray compile. Current Android source pins core `45572acd39ad7d2c50600543e17d2ad3d9388745`; its ARM64 API 26 native binding archive compiles with unchanged NDK 23.1.7779620. Existing Android status and health models accept the unchanged API shape/new warning. |
+| 3. Final verification and commit | COMPLETE | O1-O5 reconciliation | Final full resolver and DNS-manager package suites passed, including real encrypted recovery. Source/provenance reviewed; core implementation committed at `45572acd3`, Android integration at `e5d44faf7ba2f5fcb1ac348757682b92ce01982b` on `fix/dns-outage-recovery`. Temporary worktree removed after clean-commit verification; reviewed cleanup transaction `03dfbe6ce6e35847f9a13ea12d973377` applied without residuals. |
 
 Blockers: none. Tracked deferrals: none. Host transport evidence is not a claim
 of phone deployment or a new real-device exit-node test.
+
+## Verification boundaries
+
+Core module: `v1.103.0-pre.0.20261011173409-45572acd39ad`, checksum
+`h1:aZBEq3IwPfWuUMJHdYRWohLigNsQhKoxRwIPSCNmQ+s=`. The module was resolved
+from the committed local Git repository using process-local Git URL rewriting;
+it has not been pushed or published by this task. No local-path replacement is
+stored in Android's go.mod. Native verification built `./libtailscale` for
+Android ARM64 with CGO and API 26, not a signed APK/AAR release. No Gradle command
+was needed or run, and no Kotlin/API schema changed.
+
+Existing request cancellation remains authoritative. An entirely blackholed
+primary can consume the existing request deadline before a fallback is possible;
+this change adds no speculative timeout or background health polling. It fixes
+observable HTTP 5xx and network failure, not every possible cause of no internet.
+Router-only DNS failures and an installed official daemon are separate operational
+conditions outside this source implementation.
+
+## Final requirement reconciliation
+
+| Requirement | Result and verification |
+| --- | --- |
+| O1 | Verified primary-first HTTP 503/connection-error recovery, same-provider suppression and immediate return to primary. Real Cloudflare DoH answered after an injected 503. No saved provider substitution or plaintext fallback. |
+| O2 | Verified preservation of NXDOMAIN, REFUSED, empty answers and DNS SERVFAIL; HTTP 403/redirect/certificate exclusions; cancellation, both-fail and malformed response rejection; DNS question identity is case-insensitive. |
+| O3 | Verified matched-root eligibility, specific/explicit-route exclusion, local/private and authoritative-negative queries without public egress, and stale configuration suppression. Existing route-aware TLS/redirect/bootstrap checks pass; no new real-device exit-node claim. |
+| O4 | Verified recovery warning lifecycle and status disclosure without endpoint identifiers. Existing Android/Windows consumers retain their API schema and saved settings behavior. |
+| O5 | Verified exact committed core module/hash in Android, ARM64 native compilation, focused backend/client checks and Windows daemon/frontends build. No device, installation, release or remote branch was changed. |
+
+All three source-implementation stages are COMPLETE. Blockers and required
+tracked deferrals: none. Android integration is committed on the named local
+branch to preserve the pre-existing dirty main checkout. Core implementation and
+final evidence are committed locally; publication, APK/AAR packaging and device
+deployment remain outside the current request, not completed delivery actions.
+The removed 25.8 MB consisted only of regenerable native validation output and
+dependency-download copies; committed source and shared module caches remain.
