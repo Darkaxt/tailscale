@@ -6,6 +6,7 @@ package ipnlocal
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"tailscale.com/ipn"
@@ -18,6 +19,19 @@ import (
 	"tailscale.com/util/syspolicy/pkey"
 	"tailscale.com/util/syspolicy/policytest"
 )
+
+func TestLocalDNSStatusDisclosesOutageRecovery(t *testing.T) {
+	b := newTestBackend(t)
+	if err := b.pm.SetPrefs((&ipn.Prefs{CorpDNS: true, WantRunning: true, LocalDNSOverride: true, LocalDNSResolver: "https://dns.example/query", Persist: &persist.Persist{PrivateNodeKey: key.NewNode()}}).View(), ipn.NetworkProfile{}); err != nil {
+		t.Fatal(err)
+	}
+	b.state = ipn.Running
+	b.authReconfig()
+	s := b.LocalDNSStatus()
+	if !s.Applied || !strings.Contains(s.Reason, "Cloudflare") || !strings.Contains(s.Reason, "filtering") || !strings.Contains(s.Reason, "not verified") {
+		t.Fatalf("status does not disclose automatic recovery and reachability uncertainty: %+v", s)
+	}
+}
 
 func TestLocalDNSDefaultOverride(t *testing.T) {
 	const endpoint = "https://dns.controld.com/test-profile"

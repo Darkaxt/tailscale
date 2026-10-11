@@ -4,6 +4,16 @@ TailDNS adds a profile-local DNS-over-HTTPS default resolver to the forked open-
 
 The configured endpoint replaces only the default resolver. MagicDNS and eligible more-specific split-DNS routes remain authoritative. Clearing the endpoint restores the normal Tailscale DNS selection. Windows selection is always explicit and never follows Android settings.
 
+## DNS provider outages
+
+The selected local provider is always tried first. HTTP 5xx and connection
+failures automatically use Cloudflare DNS over HTTPS for default-route queries.
+This temporarily bypasses provider filtering, without changing the saved
+endpoint. The next query tries the selected provider again. MagicDNS, specific
+split routes, blocked/negative DNS answers, managed-DNS gates and exit-node
+routing are preserved. Recovery is disclosed in health status. It needs no extra
+switch or manual DNS edit. See [the outage recovery specification](dns-outage-recovery.md).
+
 ## Hotel Wi-Fi / captive portals
 
 The Windows daemon detects login redirects using DNS-independent HTTP probes
@@ -15,7 +25,8 @@ preferences are not changed. During login, local DNS is plaintext and ordinary
 internet traffic can go directly over Wi-Fi; the tray and health state disclose
 this exception. DNS errors, HTTP errors and failed probes alone never enable it.
 Managed DNS/exit-node policies are not bypassed. A different network/profile or
-disconnect invalidates the exception. No public fallback is added.
+disconnect invalidates the exception. Wi-Fi login mode itself adds no public
+fallback; ordinary provider-outage recovery is the separate behavior above.
 
 This currently monitors physical IPv4 default networks, including dual-stack
 networks. IPv6-only portals and real hotel authentication remain unverified.

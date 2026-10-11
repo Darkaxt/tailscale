@@ -325,7 +325,8 @@ type forwarder struct {
 
 	// routes are per-suffix resolvers to use, with
 	// the most specific routes first.
-	routes []route
+	routes           []route
+	routesGeneration uint64 // invalidates in-flight local recovery on reconfiguration
 	// cloudHostFallback are last resort resolvers to use if no per-suffix
 	// resolver matches. These are only populated on cloud hosts where the
 	// platform provides a well-known recursive resolver.
@@ -511,6 +512,8 @@ func (f *forwarder) setRoutes(routesBySuffix map[dnsname.FQDN][]*dnstype.Resolve
 	f.acceptDNS = acceptDNS
 	f.retireLocalDoHClientsLocked()
 	f.routes = routes
+	f.routesGeneration++
+	f.health.SetHealthy(localDNSRecovery)
 	f.cloudHostFallback = cloudHostFallback
 }
 
@@ -696,16 +699,7 @@ var (
 // send expects the reply to have the same txid as txidOut.
 func (f *forwarder) send(ctx context.Context, fq *forwardQuery, rr resolverAndDelay) (ret []byte, err error) {
 	if rr.name.LocalOverride {
-		client, err := f.getLocalDoHClient(rr.name)
-		if err != nil {
-			return nil, err
-		}
-		res, err := f.sendDoH(ctx, rr.name.Addr, client, fq.packet)
-		if err != nil {
-			// http errors can contain the complete private endpoint URL.
-			return nil, errors.New("local DoH query failed; no fallback attempted")
-		}
-		return checkResponseSizeAndSetTC(res, fq.packet, fq.family, f.logf), nil
+		return f.sendLocalDNS(ctx, fq, rr.name)
 	}
 	if f.verboseFwd {
 		id := forwarderCount.Add(1)
@@ -1229,8 +1223,16 @@ func applySchemes(logf logger.Logf, rrs []resolverAndDelay, schemes views.Map[st
 
 // resolvers returns the resolvers to use for domain.
 func (f *forwarder) resolvers(domain dnsname.FQDN) []resolverAndDelay {
+	rs, _, _ := f.resolversForQuery(domain)
+	return rs
+}
+
+// resolversForQuery also identifies the matched route, not merely the resolver
+// address. Recovery must never turn a failed specific route into a public query.
+func (f *forwarder) resolversForQuery(domain dnsname.FQDN) ([]resolverAndDelay, bool, uint64) {
 	f.mu.Lock()
 	routes := f.routes
+	generation := f.routesGeneration
 	cloudHostFallback := f.cloudHostFallback
 	schemes := f.schemeCacheLocked()
 	f.mu.Unlock()
@@ -1244,10 +1246,10 @@ func (f *forwarder) resolvers(domain dnsname.FQDN) []resolverAndDelay {
 		// route, fall through to the next matching route. If the resolvers
 		// were configured to be empty allow resolved to be empty.
 		if len(resolved) > 0 || len(route.Resolvers) == 0 {
-			return resolved
+			return resolved, route.Suffix == ".", generation
 		}
 	}
-	return cloudHostFallback // or nil if no fallback
+	return cloudHostFallback, false, generation // or nil if no fallback
 }
 
 // GetUpstreamResolvers returns the resolvers that would be used to resolve
@@ -1302,10 +1304,12 @@ func (f *forwarder) schemeCacheLocked() views.Map[string, CustomSchemeHandler] {
 // handles racing them more intelligently than just blasting away 4
 // queries at once.
 type forwardQuery struct {
-	txid   txid
-	packet []byte
-	family string // "tcp" or "udp"
-	src    netip.AddrPort
+	txid             txid
+	packet           []byte
+	family           string // "tcp" or "udp"
+	src              netip.AddrPort
+	localDefault     bool // true only for a matched root route, never explicit queries
+	routesGeneration uint64
 
 	// closeOnCtxDone lets send register values to Close if the
 	// caller's ctx expires. This avoids send from allocating its
@@ -1364,8 +1368,10 @@ func (f *forwarder) forwardWithDestChan(ctx context.Context, query packet, respo
 
 	clampEDNSSize(query.bs, maxResponseBytes)
 
+	var localDefault bool
+	var routesGeneration uint64
 	if len(resolvers) == 0 {
-		resolvers = f.resolvers(domain)
+		resolvers, localDefault, routesGeneration = f.resolversForQuery(domain)
 		if len(resolvers) == 0 {
 			// No upstream resolver for this name isn't a forwarder failure:
 			// it's split DNS / a name we weren't asked to handle. Count it
@@ -1390,11 +1396,13 @@ func (f *forwarder) forwardWithDestChan(ctx context.Context, query packet, respo
 	}
 
 	fq := &forwardQuery{
-		txid:           getTxID(query.bs),
-		packet:         query.bs,
-		family:         query.family,
-		src:            query.addr,
-		closeOnCtxDone: new(closePool),
+		localDefault:     localDefault,
+		routesGeneration: routesGeneration,
+		txid:             getTxID(query.bs),
+		packet:           query.bs,
+		family:           query.family,
+		src:              query.addr,
+		closeOnCtxDone:   new(closePool),
 	}
 	defer func() {
 		// cancel must run first. The close wakes a blocked reader with

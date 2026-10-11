@@ -138,7 +138,7 @@ func (b *LocalBackend) LocalDNSStatus() ipn.LocalDNSStatus {
 			s.Reason = "DNS is managed by policy"
 		} else if b.localDNSAppliedProfile == b.pm.CurrentProfile().ID() && b.localDNSAppliedEndpoint == s.Endpoint {
 			s.Applied = true
-			s.Reason = "Applied; provider reachability not verified"
+			s.Reason = "Applied; provider reachability not verified. Automatic encrypted outage recovery uses Cloudflare; filtering may be bypassed during provider outages"
 		} else {
 			s.Reason = "Not applied"
 		}

@@ -23,7 +23,8 @@ import (
 // getLocalDoHClient uses route-aware dials for user-selected DNS. Unlike the
 // legacy provider transport it must honor exit-node routing regardless of
 // control-plane feature knobs. Only the resolver hostname may use bootstrap;
-// ordinary question names never go to bootstrap or another default resolver.
+// ordinary question names never go to bootstrap. Automatic outage recovery uses
+// this same transport, but only after the selected default provider fails.
 func (f *forwarder) getLocalDoHClient(selected *dnstype.Resolver) (*http.Client, error) {
 	endpoint := selected.Addr
 	f.mu.Lock()
