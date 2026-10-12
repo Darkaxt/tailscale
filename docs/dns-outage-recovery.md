@@ -68,8 +68,8 @@ authoritative; this revision does not invent a new blackhole-detection deadline.
 | 1. Resolver recovery | COMPLETE | O1-O3; O4 health lifecycle | Red test reproduced HTTP 503/connection failure. Focused resolver, transport and health checks pass under the race detector. Real Cloudflare HTTPS recovery passed after injected 503. Negative answers, private/authoritative names, split/explicit routes, cancellation, both-fail, same-provider protection, reconfiguration and return to primary verified. |
 | 2. Client integration | COMPLETE | O4 status; O5 Android pin/native and Windows compatibility | Status disclosure regression passes; LocalDNS, DNS manager, CLI and tray checks pass. Windows daemon/CLI/tray compile. Current Android source pins core `45572acd39ad7d2c50600543e17d2ad3d9388745`; its ARM64 API 26 native binding archive compiles with unchanged NDK 23.1.7779620. Existing Android status and health models accept the unchanged API shape/new warning. |
 | 3. Final verification and commit | COMPLETE | O1-O5 reconciliation | Final full resolver and DNS-manager package suites passed, including real encrypted recovery. Source/provenance reviewed; core implementation committed at `45572acd3`, Android integration at `e5d44faf7ba2f5fcb1ac348757682b92ce01982b` on `fix/dns-outage-recovery`. Temporary worktree removed after clean-commit verification; reviewed cleanup transaction `03dfbe6ce6e35847f9a13ea12d973377` applied without residuals. |
-| 4. Public delivery | ACTIVE | O6; current O1-O5 integration | Refresh focused verification; integrate and publish core, pin that public core in Android main, publish signed assets and independently verify both releases. |
-| 5. Local Windows activation | NOT STARTED | O7 | Install the verified public payload in place and verify identity, configuration and live DNS continuity. |
+| 4. Public delivery | COMPLETE | O6; current O1-O5 integration | Current focused resolver/DNS and LocalDNS backend checks pass, including live HTTPS recovery. Core release source is `a950a8448904171bd058d0ce74bc3ed990001f97`. Windows `windows-v1.105.0+31` passed run `38228048578` and independent public-asset Ed25519/hash/size/AMD64/source/version verification. Android main `c5bfb74b88667f4fbc23d613fce02504bfc66672` pins that public core; main CI, dependency tidy and +29 release run `38229978883` pass. Independently downloaded APK signature/package/version/code/hash/native recovery/source proof and all public asset metadata pass. The unpublished +28 attempt was canceled because obsolete checksums failed the separate tidy gate; its tag was not reused. |
+| 5. Local Windows activation | ACTIVE | O7 | Install the verified public payload in place and verify identity, configuration and live DNS continuity. |
 
 Blockers: none. Tracked deferrals: none. Host transport evidence is not a claim
 of phone deployment or a new real-device exit-node test.
@@ -107,3 +107,44 @@ dirty main checkout. The newly authorized delivery stages above are not complete
 until their publication and activation acceptance criteria are verified.
 The removed 25.8 MB consisted only of regenerable native validation output and
 dependency-download copies; committed source and shared module caches remain.
+
+## Delivery verification, 2026-10-12
+
+Windows public release: [windows-v1.105.0+31](https://github.com/Darkaxt/tailscale/releases/tag/windows-v1.105.0%2B31).
+Source/tag: `a950a8448904171bd058d0ce74bc3ed990001f97`.
+GitHub release run `38228048578` passed both build gates and isolated signing.
+Independent public download verification checked all asset sizes and SHA-256
+digests against GitHub metadata, all five executable hashes against the signed
+manifest, AMD64 PE architecture, embedded version/source/key, and actual CLI and
+daemon version output. The detached Ed25519 signature verified with the existing
+repository public key `TQJjLuPHvAkyupKDnjDsRUI1MYRso8+PEdI2LYqbF6A=`.
+This is authenticated update metadata, not Authenticode signing.
+
+- Windows ZIP SHA-256: `e399a9c2d446776c5f7977083579a0ba57c874b3c82eaf91b089d78bf4a71383`.
+- Update manifest SHA-256: `40c5e1f460e224caa70390ca278267e15e4063995e065a2275c813ab86e88e8b`.
+- The published release is neither draft nor prerelease.
+
+Android public release: [v1.103.312+29](https://github.com/Darkaxt/TailDNS/releases/tag/v1.103.312%2B29).
+Source/tag: `c5bfb74b88667f4fbc23d613fce02504bfc66672`; core provenance matches
+the Windows release source above. The exact-source main CI, dependency-tidy and
+isolated release/signing jobs pass. Independently downloaded assets match both
+SHA256SUMS and GitHub's sizes/digests. Android build-tools 36.0.0 independently
+verified the APK signature and package `io.github.darkaxt.taildns`, version
+`1.103.312+29`, version code `298632870` (previous public code `298610400`).
+The ARM64 Go JNI library contains the expected core identity and recovery
+implementation markers. The public release is neither draft nor prerelease.
+
+- APK SHA-256: `8c42b8c0801e7b47a656419784713559860956fc8736111990991c7cbfa5fda2`.
+- Unchanged certificate SHA-256: `dcd0ede91eb7e0ed88a72b5289f84f8d4a61ccc22707f36378e15540b99d32e1`.
+- No Android device deployment is claimed.
+
+Pre-deployment inspection found that the existing +30 deployment record no longer
+matched the active installation: the CLI/daemon were official signed Tailscale
+1.104.1, and its official GUI had also changed. The installed TailDNS tray remained.
+Both official replacements had valid Tailscale Inc. signatures. Wintun still
+matched the preserved checksum. Current preferences had `CorpDNS=false` and
+official `AutoUpdate.Apply=true`. This records measured drift; it does not prove
+which external updater replaced the binaries. Activation must reconcile the
+verified official GUI checksum, preserve the currently selected DNS preference,
+prevent official replacement during the transaction and validate the actual
+running fork, not merely trust the existing deployment record.
