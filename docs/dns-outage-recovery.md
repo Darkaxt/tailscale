@@ -69,16 +69,14 @@ authoritative; this revision does not invent a new blackhole-detection deadline.
 | 2. Client integration | COMPLETE | O4 status; O5 Android pin/native and Windows compatibility | Status disclosure regression passes; LocalDNS, DNS manager, CLI and tray checks pass. Windows daemon/CLI/tray compile. Current Android source pins core `45572acd39ad7d2c50600543e17d2ad3d9388745`; its ARM64 API 26 native binding archive compiles with unchanged NDK 23.1.7779620. Existing Android status and health models accept the unchanged API shape/new warning. |
 | 3. Final verification and commit | COMPLETE | O1-O5 reconciliation | Final full resolver and DNS-manager package suites passed, including real encrypted recovery. Source/provenance reviewed; core implementation committed at `45572acd3`, Android integration at `e5d44faf7ba2f5fcb1ac348757682b92ce01982b` on `fix/dns-outage-recovery`. Temporary worktree removed after clean-commit verification; reviewed cleanup transaction `03dfbe6ce6e35847f9a13ea12d973377` applied without residuals. |
 | 4. Public delivery | COMPLETE | O6; current O1-O5 integration | Current focused resolver/DNS and LocalDNS backend checks pass, including live HTTPS recovery. Core release source is `a950a8448904171bd058d0ce74bc3ed990001f97`. Windows `windows-v1.105.0+31` passed run `38228048578` and independent public-asset Ed25519/hash/size/AMD64/source/version verification. Android main `c5bfb74b88667f4fbc23d613fce02504bfc66672` pins that public core; main CI, dependency tidy and +29 release run `38229978883` pass. Independently downloaded APK signature/package/version/code/hash/native recovery/source proof and all public asset metadata pass. The unpublished +28 attempt was canceled because obsolete checksums failed the separate tidy gate; its tag was not reused. |
-| 5. Local Windows activation | BLOCKED | O7 | The elevated PowerShell launch returned Windows error 1223 / operation canceled before the deployment script started. No activation/result log was created; actual installed CLI still reports official 1.104.1. Public payload and reviewed deployment script are retained for a fresh approved UAC launch. Service/tray/DNS/identity activation verification is not complete. |
+| 5. Local Windows activation | COMPLETE | O7 | The approved UAC retry installed `1.105.0-taildns.31` in the existing Tailscale directory. Native installer activation/status and independent post-activation checks passed: running service and tray, exact four installed payload hashes, node/IP/Tailnet Lock identity, unchanged service path/GUI/Wintun/settings, resolver API, public DNS and direct Quad100 MagicDNS. Existing `CorpDNS=false` and automatic-update preference were restored. Transactional rollback material remains in ProgramData. |
 
-Source-implementation blockers: none. Delivery blocker: O7 requires an elevated
-Windows activation process; the OS elevation request was canceled before launch.
-This is external and resolves when a fresh UAC request is accepted. Local
-installation, post-activation identity/settings/DNS verification and overall
-delivery remain incomplete until then. Tracked deferrals: none. Host transport
+Source-implementation and delivery blockers: none. All five stages are COMPLETE;
+the successful elevated retry resolved the previous O7 activation blocker.
+Tracked deferrals: none. Host transport
 evidence is not a claim of phone deployment or a new real-device exit-node test.
 
-## Verification boundaries
+## Original source-only verification boundaries (historical)
 
 Core module: `v1.103.0-pre.0.20261011173409-45572acd39ad`, checksum
 `h1:aZBEq3IwPfWuUMJHdYRWohLigNsQhKoxRwIPSCNmQ+s=`. The module was resolved
@@ -95,7 +93,7 @@ observable HTTP 5xx and network failure, not every possible cause of no internet
 Router-only DNS failures and an installed official daemon are separate operational
 conditions outside this source implementation.
 
-## Final requirement reconciliation
+## Original source-only requirement reconciliation (historical)
 
 | Requirement | Result and verification |
 | --- | --- |
@@ -107,8 +105,8 @@ conditions outside this source implementation.
 
 All three original source-implementation stages are COMPLETE. Android
 integration was committed on the named local branch to preserve the pre-existing
-dirty main checkout. The newly authorized delivery stages above are not complete
-until their publication and activation acceptance criteria are verified.
+dirty main checkout. The subsequently authorized delivery stages are reconciled
+separately below.
 The removed 25.8 MB consisted only of regenerable native validation output and
 dependency-download copies; committed source and shared module caches remain.
 
@@ -153,10 +151,30 @@ verified official GUI checksum, preserve the currently selected DNS preference,
 prevent official replacement during the transaction and validate the actual
 running fork, not merely trust the existing deployment record.
 
-The attempted elevated launch did not start: Windows returned operation canceled
-at `Start-Process -Verb RunAs`. No deployment script process or activation log was
-observed, and the CLI was freshly rechecked as official 1.104.1. No claim is made
-about who dismissed the OS prompt. The verified Windows assets and reviewed
-script remain in `D:\Temp\taildns-recovery-delivery-20261012` for the required
-retry. Android release verification is complete; neither Android device
-installation nor successful local Windows activation is claimed.
+The first elevated launch did not start: Windows returned operation canceled
+at `Start-Process -Verb RunAs`. No claim is made about who dismissed that prompt.
+The user-requested retry was approved and exited successfully. Native installer
+activation and status both report `1.105.0+31`; the actual installed CLI reports
+`1.105.0-taildns.31` and core `a950a8448904171bd058d0ce74bc3ed990001f97`.
+The Tailscale service is Running from `C:\Program Files\Tailscale\tailscaled.exe`,
+and the TailDNS tray processes are present. All four installed payload hashes,
+preserved GUI/Wintun hashes, node ID/IPs and public Tailnet Lock identity match
+the pre-activation baseline or verified release manifest as applicable.
+The resolver status API, public DNS and direct Quad100 MagicDNS checks passed.
+
+Current `CorpDNS=false` was preserved: the custom resolver is neither configured
+nor applied on this Windows profile. Recovery support is installed, but this is
+not a claim that profile-local provider recovery is currently active. The
+original automatic-update preference is enabled again under the fork-aware
+updater. The native transaction retained rollback material in
+`C:\ProgramData\TailDNS\rollback\1.105.0+31`; staging downloads/scripts are
+expendable after this evidence is committed. No Android installation is claimed.
+
+### Final delivery reconciliation
+
+- O1-O5: source verification above remains applicable to the exact release core;
+  current public Windows/Android provenance and native payload checks pass.
+- O6: both public releases and independently downloaded assets are verified.
+- O7: approved in-place Windows activation, identity/settings preservation,
+  service/tray/API/DNS verification and retained transaction rollback pass.
+- All stages are COMPLETE; no blockers or required tracked deferrals remain.
