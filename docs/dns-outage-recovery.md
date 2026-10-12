@@ -3,8 +3,10 @@
 Authorization: already authorized on 2026-10-11. The user explicitly selected
 working internet over retaining filtering during a provider outage. This replaces
 the ordinary-transport fail-closed requirement of the original local DNS
-specification (R08), only within the boundaries below. Publication and device
-deployment are not part of this implementation request.
+specification (R08), only within the boundaries below. On 2026-10-12 the user
+additionally authorized public Windows/Android releases and local Windows
+deployment. The original source-only verification below remains historical
+evidence, not a claim that delivery has happened.
 
 ## Incident and scope
 
@@ -45,6 +47,15 @@ TailDNS client resolver; it does not repair the router or the provider.
   Windows build compatibility, Android dependency provenance and a focused
   Android native/binding check. No device state is changed. Record any genuinely
   unavailable verification explicitly, without calling its stage complete.
+- O6: Publish immutable next-sequence Windows and Android releases through the
+  existing isolated GitHub signing jobs, retaining the official upstream base
+  versions. Independently download and verify public assets, checksums, signing
+  identities and source provenance before installation.
+- O7: Deploy the verified matching Windows payload in the existing Tailscale
+  directory, preserving node/login/Tailnet Lock identity, Wintun, profile DNS
+  settings and a verified rollback. Verify service, tray, resolver status,
+  public DNS and MagicDNS after activation. Android publication does not imply
+  Android device deployment.
 
 No extra polling, retry loop, circuit breaker, arbitrary synchronization timer,
 or platform DNS mutation is introduced. The existing DNS request context remains
@@ -57,6 +68,8 @@ authoritative; this revision does not invent a new blackhole-detection deadline.
 | 1. Resolver recovery | COMPLETE | O1-O3; O4 health lifecycle | Red test reproduced HTTP 503/connection failure. Focused resolver, transport and health checks pass under the race detector. Real Cloudflare HTTPS recovery passed after injected 503. Negative answers, private/authoritative names, split/explicit routes, cancellation, both-fail, same-provider protection, reconfiguration and return to primary verified. |
 | 2. Client integration | COMPLETE | O4 status; O5 Android pin/native and Windows compatibility | Status disclosure regression passes; LocalDNS, DNS manager, CLI and tray checks pass. Windows daemon/CLI/tray compile. Current Android source pins core `45572acd39ad7d2c50600543e17d2ad3d9388745`; its ARM64 API 26 native binding archive compiles with unchanged NDK 23.1.7779620. Existing Android status and health models accept the unchanged API shape/new warning. |
 | 3. Final verification and commit | COMPLETE | O1-O5 reconciliation | Final full resolver and DNS-manager package suites passed, including real encrypted recovery. Source/provenance reviewed; core implementation committed at `45572acd3`, Android integration at `e5d44faf7ba2f5fcb1ac348757682b92ce01982b` on `fix/dns-outage-recovery`. Temporary worktree removed after clean-commit verification; reviewed cleanup transaction `03dfbe6ce6e35847f9a13ea12d973377` applied without residuals. |
+| 4. Public delivery | ACTIVE | O6; current O1-O5 integration | Refresh focused verification; integrate and publish core, pin that public core in Android main, publish signed assets and independently verify both releases. |
+| 5. Local Windows activation | NOT STARTED | O7 | Install the verified public payload in place and verify identity, configuration and live DNS continuity. |
 
 Blockers: none. Tracked deferrals: none. Host transport evidence is not a claim
 of phone deployment or a new real-device exit-node test.
@@ -88,10 +101,9 @@ conditions outside this source implementation.
 | O4 | Verified recovery warning lifecycle and status disclosure without endpoint identifiers. Existing Android/Windows consumers retain their API schema and saved settings behavior. |
 | O5 | Verified exact committed core module/hash in Android, ARM64 native compilation, focused backend/client checks and Windows daemon/frontends build. No device, installation, release or remote branch was changed. |
 
-All three source-implementation stages are COMPLETE. Blockers and required
-tracked deferrals: none. Android integration is committed on the named local
-branch to preserve the pre-existing dirty main checkout. Core implementation and
-final evidence are committed locally; publication, APK/AAR packaging and device
-deployment remain outside the current request, not completed delivery actions.
+All three original source-implementation stages are COMPLETE. Android
+integration was committed on the named local branch to preserve the pre-existing
+dirty main checkout. The newly authorized delivery stages above are not complete
+until their publication and activation acceptance criteria are verified.
 The removed 25.8 MB consisted only of regenerable native validation output and
 dependency-download copies; committed source and shared module caches remain.
