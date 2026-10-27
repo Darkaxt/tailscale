@@ -53,12 +53,15 @@ const (
 	windows = "windows"
 )
 
-// registerIncubator registers the incubator child process handlers.
+// registerIncubator registers the incubator child process handlers and
+// the per-connection ssh monitor.
 // It is called from [Register], which is called from the init of
 // tailscale.com/feature/ssh.
 func registerIncubator() {
 	childproc.Add("ssh", beIncubator)
 	childproc.Add("sftp", beSFTP)
+	childproc.Add("ssh-monitor", beMonitor)
+	childproc.Add("ssh-fwd", beFwdChild)
 }
 
 var ptyName = func(f *os.File) (string, error) {
