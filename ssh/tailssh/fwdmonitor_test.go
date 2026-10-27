@@ -9,7 +9,7 @@
 // handleSSHAgentForwarding. The forwarding-path tests drive a real conn
 // with a real monitor and real one-shot fwd children through the
 // self-exec seams in fwdchild_test.go. TestFwdAllowedSocketPathCaps and
-// TestFwdMonitorClosedRefusesRespawn exercise the lexical policy and
+// TestConnMonitorClosedRefusesRespawn exercise the lexical policy and
 // the closed flag directly. Under root the conn binds to the non-root
 // test user, so the cross-uid closures are pinned: socket ownership,
 // permission-denied dials, and kernel privileged-port refusal. Non-root
@@ -89,18 +89,35 @@ func newFwdTestConn(t *testing.T, lu *userMeta, final *tailcfg.SSHAction) *conn 
 	} else {
 		t.Fatalf("os.Getgroups: %v", err)
 	}
+	// Install a matching policy and authenticated state for forwarding rechecks.
+	rule := &tailcfg.SSHRule{
+		SSHUsers:   map[string]string{lu.Username: lu.Username},
+		Action:     final,
+		Principals: []*tailcfg.SSHPrincipal{{Any: true}},
+	}
 	c := &conn{
 		// t.Logf so bind/spawn failures are visible in test output.
 		// tailscaledPath is the reachable copy of the test binary: the
 		// monitor exec'd from it spawns the fwd children from the same
 		// path, and under a root run the bound user can exec the copy
 		// but not the original.
-		srv:          &server{logf: t.Logf, tailscaledPath: exe},
-		localUser:    lu,
-		userGroupIDs: groups,
-		finalAction:  final,
+		srv: &server{logf: t.Logf, tailscaledPath: exe, lb: &localState{
+			sshEnabled:   true,
+			matchingRule: rule,
+		}},
+		localUser:       lu,
+		mappedLocalUser: lu.Username,
+		userGroupIDs:    groups,
+		action0:         final,
+		finalAction:     final,
+		info: &sshConnInfo{
+			sshUser: lu.Username,
+			src:     netip.MustParseAddrPort("100.100.100.101:2231"),
+			dst:     netip.MustParseAddrPort("100.100.100.102:22"),
+		},
 	}
-	t.Cleanup(c.closeFwdMonitor)
+	c.authCompleted.Store(true)
+	t.Cleanup(c.closeConnMonitor)
 	return c
 }
 
@@ -484,18 +501,16 @@ func TestFwdTCPHandler(t *testing.T) {
 		t.Errorf("echo = %q; want %q", got, want)
 	}
 
-	// Canceling the request's context closes the listener through the
-	// conn's ctx-done goroutine.
+	// Connection cancellation must close the forwarded listener.
 	cancel()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if conn, err := net.DialTimeout("tcp", fwdAddr, time.Second); err != nil {
-			break // listener closed
-		} else {
-			conn.Close()
-			time.Sleep(50 * time.Millisecond)
+	eventually(t, 5*time.Second, "forwarded listener remained open after cancellation", func() bool {
+		conn, err := net.DialTimeout("tcp", fwdAddr, time.Second)
+		if err != nil {
+			return true
 		}
-	}
+		conn.Close()
+		return false
+	})
 
 	// Non-loopback binds are rejected without the gateway-ports knob…
 	ctx2, cancel2 := fwdTestCtx(fwdTestSSHConn{})
@@ -956,7 +971,9 @@ func TestFwdConnLocalUnixSymlinkToProtectedSocket(t *testing.T) {
 			if m != "PROTECTED" {
 				t.Fatalf("unexpected canary marker %q", m)
 			}
-		default:
+		case <-time.After(5 * time.Second):
+			// Reading the socket marker does not synchronize with the
+			// canary goroutine's subsequent channel send.
 			t.Fatal("control marker not recorded by canary")
 		}
 		// The five forwarded attempts through the symlink were all refused.
@@ -1130,6 +1147,32 @@ func TestFwdConnLocalUnixDirSwapRaceNeverServesProtectedSocket(t *testing.T) {
 		attempts.Load(), dials.Load(), eacces.Load(), enoent.Load(), swaps.Load())
 }
 
+// TestMonExitRegistryPIDReuse checks both exit-before-registration and
+// registration-before-exit when two child generations share a PID.
+func TestMonExitRegistryPIDReuse(t *testing.T) {
+	var r monExitRegistry
+	old := monitorProcess{PID: 42, ID: 1}
+	fresh := monitorProcess{PID: 42, ID: 2}
+	ch, ch2 := newMonExitStatus(), newMonExitStatus()
+	r.dispatchExit(old, 7)
+	r.registerSessionExit(fresh, ch2)
+	r.registerSessionExit(old, ch)
+	<-ch.done
+	if ch.code != 7 {
+		t.Fatalf("old exit = %d; want 7", ch.code)
+	}
+	select {
+	case <-ch2.done:
+		t.Fatal("old notification completed the new child")
+	default:
+	}
+	r.dispatchExit(fresh, 9)
+	<-ch2.done
+	if ch2.code != 9 || ch.code != 7 {
+		t.Fatalf("exit codes = %d, %d; want 7, 9", ch.code, ch2.code)
+	}
+}
+
 // TestFwdAllowedSocketPathCaps pins the allowlist's two lexical caps:
 // a home directory that cleans to "/" must not collapse the allowlist
 // to "every absolute path", and over-long paths beyond the sun_path
@@ -1160,26 +1203,26 @@ func TestFwdAllowedSocketPathCaps(t *testing.T) {
 	}
 }
 
-// TestFwdMonitorClosedRefusesRespawn pins the closed flag on fwdState.
-// See fwdState.closed. Once the conn's teardown has run, fwdMonitor must
+// TestConnMonitorClosedRefusesRespawn pins the closed flag on connMonitorState.
+// See connMonitorState.closed. Once the conn's teardown has run, connMonitor must
 // refuse to spawn for every late caller, including session launch, unix
 // and TCP forwarding, and agent forwarding.
-func TestFwdMonitorClosedRefusesRespawn(t *testing.T) {
+func TestConnMonitorClosedRefusesRespawn(t *testing.T) {
 	lu := fwdTestIdentity(t)
 	c := newFwdTestConn(t, lu, &tailcfg.SSHAction{Accept: true})
-	if _, err := c.fwdMonitor(); err != nil {
+	if _, err := c.connMonitor(); err != nil {
 		t.Fatalf("spawning monitor: %v", err)
 	}
-	c.closeFwdMonitor()
+	c.closeConnMonitor()
 
-	if _, err := c.fwdMonitor(); err == nil {
-		t.Fatal("fwdMonitor spawned a monitor after closeFwdMonitor; want refusal (nobody would close it)")
+	if _, err := c.connMonitor(); err == nil {
+		t.Fatal("connMonitor spawned a monitor after closeConnMonitor; want refusal (nobody would close it)")
 	}
-	if mc := c.fwdMonitorIfAny(); mc != nil {
-		t.Fatal("fwdMonitor left a monitor in fwd.mon after closeFwdMonitor")
+	if mc := c.connMonitorIfAny(); mc != nil {
+		t.Fatal("connMonitor left a monitor in monitor.mon after closeConnMonitor")
 	}
 	// Closing again stays a no-op.
-	c.closeFwdMonitor()
+	c.closeConnMonitor()
 }
 
 // TestRemoveAgentForwardingDirRefuses pins the session-end removal guard
