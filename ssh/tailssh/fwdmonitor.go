@@ -7,9 +7,13 @@
 // dialed and bound by one-shot children of the per-connection ssh-monitor
 // running with the authenticated local user's credentials.
 //
+//   - TCP -L/-D, direct-tcpip: policy stays in tailscaled, then name
+//     resolution and dialing run in a one-shot child as the bound user.
+//     The connected socket is handed back without changing its kernel owner.
 //   - unix -L, direct-streamlocal: the lexical allowlist check stays in
-//     tailscaled as coarse policy, then the dial runs as the user. See
-//     conn.fwdAllowedSocketPath for the path policy.
+//     tailscaled as coarse policy, then the dial and service-side payload
+//     writes run as the user in a relay child. See conn.fwdAllowedSocketPath
+//     for the path policy.
 //   - unix -R, streamlocal-forward: the listener child binds with
 //     umask-at-bind and unlink-if-owned semantics. The socket is 0600 and
 //     user-owned from the moment it exists.
@@ -29,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -36,6 +41,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -44,103 +50,6 @@ import (
 	gliderssh "github.com/tailscale/gliderssh"
 	gossh "golang.org/x/crypto/ssh"
 )
-
-// fwdState is the conn's forwarding state. It holds the per-connection
-// monitor, spawned lazily on the first forwarding or agent need and
-// closed when the conn is torn down. The monitor's identity is bound at
-// spawn to the conn's localUser, with the uid, gid, and groups from
-// clientAuth.
-type fwdState struct {
-	mu  sync.Mutex
-	mon *monitorClient
-
-	// closed is set by closeFwdMonitor, before the lock is dropped. Once
-	// the conn's teardown has run, fwdMonitor refuses to spawn.
-	// fwdMonitorIfAny is unaffected and read-only.
-	closed bool
-}
-
-// fwdMonitor returns the conn's monitor, spawning it on first use with
-// the spawn-bound identity documented on fwdState.
-func (c *conn) fwdMonitor() (*monitorClient, error) {
-	c.fwd.mu.Lock()
-	defer c.fwd.mu.Unlock()
-	if c.fwd.mon != nil {
-		return c.fwd.mon, nil
-	}
-	if c.fwd.closed {
-		return nil, errors.New("monitor closed at connection teardown")
-	}
-	uid, gid, groups, err := c.fwdCreds()
-	if err != nil {
-		return nil, err
-	}
-	// The monitor is exec'd from the tailscaled binary; in tests
-	// os.Executable() is the test binary. The incubator spawn takes the
-	// same path from srv.tailscaledPath.
-	exe := c.srv.tailscaledPath
-	if exe == "" {
-		exe, err = os.Executable()
-		if err != nil {
-			return nil, fmt.Errorf("ssh-monitor: executable: %w", err)
-		}
-	}
-	mc, err := spawnMonitor(exe, uid, gid, groups, c.localUser.Username)
-	if err != nil {
-		return nil, fmt.Errorf("spawning ssh-monitor for forwarding as %q: %w", c.localUser.Username, err)
-	}
-	c.fwd.mon = mc
-	return mc, nil
-}
-
-// fwdMonitorIfAny returns the conn's monitor without spawning one.
-// Callers that can race the conn's teardown must use it instead of the
-// lazy fwdMonitor. See fwdState.closed. Nil means the monitor is already
-// gone.
-func (c *conn) fwdMonitorIfAny() *monitorClient {
-	c.fwd.mu.Lock()
-	defer c.fwd.mu.Unlock()
-	return c.fwd.mon
-}
-
-// fwdCreds returns the monitor's spawn identity, parsing like the
-// incubator's argv does. The ids are carried at their 32-bit ABI width.
-func (c *conn) fwdCreds() (uid, gid uint32, groups []uint32, err error) {
-	u64, err := strconv.ParseUint(c.localUser.Uid, 10, 32)
-	if err != nil {
-		return 0, 0, nil, fmt.Errorf("forwarding: parsing local user uid %q: %w", c.localUser.Uid, err)
-	}
-	g64, err := strconv.ParseUint(c.localUser.Gid, 10, 32)
-	if err != nil {
-		return 0, 0, nil, fmt.Errorf("forwarding: parsing local user gid %q: %w", c.localUser.Gid, err)
-	}
-	for _, g := range c.userGroupIDs {
-		v, err := strconv.ParseUint(g, 10, 32)
-		if err != nil {
-			return 0, 0, nil, fmt.Errorf("forwarding: parsing local user group %q: %w", g, err)
-		}
-		groups = append(groups, uint32(v))
-	}
-	return uint32(u64), uint32(g64), groups, nil
-}
-
-// closeFwdMonitor closes the conn's monitor, if one was spawned. It
-// runs from HandleSSHConn's defer after the SSH connection is done.
-// Closing the RPC channel triggers the monitor's teardown in monitor.go.
-// Closing a second time is a no-op.
-func (c *conn) closeFwdMonitor() {
-	c.fwd.mu.Lock()
-	mc := c.fwd.mon
-	c.fwd.mon = nil
-	c.fwd.closed = true
-	c.fwd.mu.Unlock()
-	if mc == nil {
-		return
-	}
-	if err := mc.Close(); err != nil {
-		c.logf("ssh: closing forwarding monitor: %v", err)
-	}
-}
 
 // fwdMaxSunPathLen is the sun_path capacity. It is the lexical length
 // cap on unix socket paths, the same one gliderssh's path validator
@@ -180,14 +89,107 @@ func (c *conn) fwdAllowedSocketPath(socketPath string) (string, error) {
 	return "", fmt.Errorf("socket path %q is not in an allowed directory: %w", cleaned, gliderssh.ErrRejected)
 }
 
+// fwdDirectTCPIPHandler serves both TCP -L and SOCKS -D forwards: both use
+// RFC 4254 direct-tcpip channels. Policy is checked before spawning a monitor
+// or dialer. The child resolves/dials using the local account selected during
+// SSH authentication (c.localUser): its UID, GID and supplementary groups are
+// fixed when the per-connection monitor is spawned. The forwarding request
+// supplies no user identity and cannot change those credentials.
+func (c *conn) fwdDirectTCPIPHandler(srv *gliderssh.Server, _ *gossh.ServerConn, newChan gossh.NewChannel, ctx gliderssh.Context) {
+	var d struct {
+		DestAddr   string
+		DestPort   uint32
+		OriginAddr string
+		OriginPort uint32
+	}
+	if err := gossh.Unmarshal(newChan.ExtraData(), &d); err != nil {
+		newChan.Reject(gossh.ConnectionFailed, "error parsing forward data: "+err.Error())
+		return
+	}
+	if d.DestPort == 0 || d.DestPort > math.MaxUint16 {
+		newChan.Reject(gossh.ConnectionFailed, "destination port must be between 1 and 65535")
+		return
+	}
+	if srv.LocalPortForwardingCallback == nil || !srv.LocalPortForwardingCallback(ctx, d.DestAddr, d.DestPort) {
+		newChan.Reject(gossh.Prohibited, "port forwarding is disabled")
+		return
+	}
+	mc, err := c.connMonitor()
+	if err != nil {
+		newChan.Reject(gossh.ConnectionFailed, err.Error())
+		return
+	}
+	dconn, err := mc.DialTCP(ctx, net.JoinHostPort(d.DestAddr, strconv.FormatUint(uint64(d.DestPort), 10)))
+	if err != nil {
+		newChan.Reject(gossh.ConnectionFailed, err.Error())
+		return
+	}
+	fwdAcceptAndBicopy(ctx, newChan, dconn)
+}
+
+// fwdDirectStreamLocalHandler keeps channel lifetime separate from data EOF.
+// gliderssh's generic forwarding loop uses the connection context, which
+// does not end when just this SSH channel closes. The request stream closes
+// on CHANNEL_CLOSE (not CHANNEL_EOF), so use it to end this channel's relay.
+func fwdDirectStreamLocalHandler(srv *gliderssh.Server, _ *gossh.ServerConn, newChan gossh.NewChannel, ctx gliderssh.Context) {
+	var d struct {
+		SocketPath string
+		Reserved1  string
+		Reserved2  uint32
+	}
+	if err := gossh.Unmarshal(newChan.ExtraData(), &d); err != nil {
+		newChan.Reject(gossh.ConnectionFailed, "error parsing direct-streamlocal data: "+err.Error())
+		return
+	}
+	if srv.LocalUnixForwardingCallback == nil {
+		newChan.Reject(gossh.Prohibited, "unix forwarding is disabled")
+		return
+	}
+	dconn, err := srv.LocalUnixForwardingCallback(ctx, d.SocketPath)
+	if err != nil {
+		if errors.Is(err, gliderssh.ErrRejected) {
+			msg := err.Error()
+			if err == gliderssh.ErrRejected {
+				msg = "unix forwarding is disabled"
+			}
+			newChan.Reject(gossh.Prohibited, msg)
+		} else {
+			newChan.Reject(gossh.ConnectionFailed, fmt.Sprintf("dial unix socket %q: %v", d.SocketPath, err))
+		}
+		return
+	}
+	fwdAcceptAndBicopy(ctx, newChan, dconn)
+}
+
+// fwdAcceptAndBicopy owns dconn, accepting the channel and copying data until
+// completion or closure. Channel EOF permits a response; full channel closure
+// stops waiting for the service while allowing buffered client payload to drain.
+func fwdAcceptAndBicopy(ctx context.Context, newChan gossh.NewChannel, dconn net.Conn) {
+	ch, reqs, err := newChan.Accept()
+	if err != nil {
+		dconn.Close()
+		return
+	}
+	go func() {
+		gossh.DiscardRequests(reqs)
+		// CHANNEL_CLOSE ends service output, but the channel may still
+		// have buffered client payload to drain. Bound that final write
+		// rather than canceling both copy directions and losing the data.
+		dconn.SetWriteDeadline(time.Now().Add(fwdRelayCloseDrainTimeout))
+		dconn.SetReadDeadline(time.Now())
+	}()
+	fwdBicopy(ctx, ch, dconn)
+}
+
 // fwdDialUnix is the unix -L path (direct-streamlocal): dial socketPath
-// through a one-shot child with the local user's credentials.
+// through a child with the local user's credentials. The child retains the
+// service socket and relays payload bytes over the returned socketpair end.
 func (c *conn) fwdDialUnix(ctx gliderssh.Context, socketPath string) (net.Conn, error) {
 	path, err := c.fwdAllowedSocketPath(socketPath)
 	if err != nil {
 		return nil, err
 	}
-	mc, err := c.fwdMonitor()
+	mc, err := c.connMonitor()
 	if err != nil {
 		return nil, err
 	}
@@ -210,7 +212,7 @@ func (c *conn) fwdListenUnix(ctx gliderssh.Context, socketPath string) (net.List
 	if err != nil {
 		return nil, err
 	}
-	mc, err := c.fwdMonitor()
+	mc, err := c.connMonitor()
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +226,7 @@ func (c *conn) fwdListenUnix(ctx gliderssh.Context, socketPath string) (net.List
 // local user, unused on unix.
 func (c *conn) fwdListenAgent(ctx gliderssh.Context, lu *userMeta) (net.Listener, string, error) {
 	_ = lu
-	mc, err := c.fwdMonitor()
+	mc, err := c.connMonitor()
 	if err != nil {
 		return nil, "", err
 	}
@@ -315,7 +317,7 @@ func (h *fwdTCPHandler) HandleSSHRequest(ctx gliderssh.Context, _ *gliderssh.Ser
 		if !ok {
 			return false, []byte("binding to non-loopback addresses is not permitted")
 		}
-		mc, err := h.conn.fwdMonitor()
+		mc, err := h.conn.connMonitor()
 		if err != nil {
 			h.conn.logf("ssh: reverse port forward: %v", err)
 			return false, []byte{}
@@ -337,16 +339,12 @@ func (h *fwdTCPHandler) HandleSSHRequest(ctx gliderssh.Context, _ *gliderssh.Ser
 		h.mu.Lock()
 		h.forwards[addr] = ln
 		h.mu.Unlock()
+		// Close this listener when the SSH connection ends. Stop watching
+		// the connection when the accept loop exits, including on cancellation
+		// of this forward while the connection remains open.
+		stop := context.AfterFunc(ctx, func() { ln.Close() })
 		go func() {
-			<-ctx.Done()
-			h.mu.Lock()
-			fln, ok := h.forwards[addr]
-			h.mu.Unlock()
-			if ok {
-				fln.Close()
-			}
-		}()
-		go func() {
+			defer stop()
 			defer func() {
 				h.mu.Lock()
 				if h.forwards[addr] == ln {
@@ -447,10 +445,12 @@ func fwdHalfCloseWrite(c io.ReadWriteCloser) {
 	}
 }
 
-// wireReverseForwarding installs the conn's reverse TCP forwarding
-// request handlers. On unix they are fwdTCPHandler's, binding through
-// the monitor.
-func (c *conn) wireReverseForwarding(ss *gliderssh.Server) {
+// wireForwarding installs the conn's direct forwarding and reverse TCP
+// handlers. Socket creation goes through the credential-bound monitor children;
+// direct forwarding also handles channel closure independently of the connection.
+func (c *conn) wireForwarding(ss *gliderssh.Server) {
+	ss.ChannelHandlers["direct-tcpip"] = c.fwdDirectTCPIPHandler
+	ss.ChannelHandlers["direct-streamlocal@openssh.com"] = fwdDirectStreamLocalHandler
 	h := &fwdTCPHandler{conn: c}
 	ss.RequestHandlers["tcpip-forward"] = h.HandleSSHRequest
 	ss.RequestHandlers["cancel-tcpip-forward"] = h.HandleSSHRequest

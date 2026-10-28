@@ -45,7 +45,21 @@ var testFwdPrefix = []string{"-test.run=^TestSSHFwdHelperProcess$", "-test.timeo
 func TestSSHFwdHelperProcess(t *testing.T) {
 	for i, a := range os.Args {
 		if a == "--" && i+1 < len(os.Args) && os.Args[i+1] == "ssh-fwd" {
-			if err := beFwdChild(os.Args[i+2:]); err != nil {
+			// Declared-fds pin for the fwd child. When the test asks
+			// for it, the child dumps its exec-inherited fd table
+			// before performing the op. The dump path arrives by
+			// argv, from the monitor's spawn of this child: the child
+			// itself runs with no environment. The test-only flag is
+			// stripped before the op parser sees it.
+			var childArgs []string
+			for _, a := range os.Args[i+2:] {
+				if p, ok := strings.CutPrefix(a, "--test-fdinfo="); ok {
+					dumpChildFdsTo(p, "ssh-fwd")
+					continue
+				}
+				childArgs = append(childArgs, a)
+			}
+			if err := beFwdChild(childArgs); err != nil {
 				// The op's outcome was already reported on the result
 				// channel; the exit code mirrors it.
 				fmt.Fprintln(os.Stderr, "ssh-fwd child:", err)
@@ -731,7 +745,8 @@ func zombieChildrenOf(ppid int) int {
 // shapes carry no identity keys on the wire.
 func TestFwdRequestsCarryNoIdentity(t *testing.T) {
 	for _, f := range []rpcFrame{
-		rpcDialReq(1, "/tmp/x.sock"),
+		rpcDialReq(1, "unix", "/tmp/x.sock"),
+		rpcDialReq(6, "tcp", "localhost:443"),
 		rpcListenReq(2, "unix", "/tmp/x.sock", false, false),
 		rpcListenReq(3, "unix", "/tmp/x.sock", true, false),
 		rpcListenReq(4, "tcp", "127.0.0.1:0", false, false),
@@ -749,14 +764,16 @@ func TestFwdRequestsCarryNoIdentity(t *testing.T) {
 		}
 	}
 
-	// The ops refuse unsupported shapes (dial is unix-only and absolute;
-	// listen net must be unix, tcp, or agent), and the channel stays
-	// healthy afterwards.
+	// The ops refuse unsupported networks and malformed addresses, and
+	// the channel stays healthy afterwards.
 	mc := startFwdTestMonitor(t, os.Getuid(), os.Getgid(), testGroups(t))
 	ctx, cancel := testCtx()
 	defer cancel()
 	for _, f := range []rpcFrame{
-		{Op: opDial, Net: "tcp", Addr: "127.0.0.1:1"},
+		{Op: opDial, Net: "udp", Addr: "127.0.0.1:1"},
+		{Op: opDial, Net: "tcp", Addr: "127.0.0.1:65536"},
+		{Op: opDial, Net: "tcp", Addr: "localhost:http"},
+		{Op: opDial, Net: "tcp", Addr: "missing-port"},
 		{Op: opDial, Net: "unix", Addr: "relative.sock"},
 		{Op: opDial, Net: "unix", Addr: "@/abstract"},
 		{Op: opListen, Net: "udp", Addr: "x"},

@@ -22,10 +22,6 @@ import (
 	gliderssh "github.com/tailscale/gliderssh"
 )
 
-// fwdState is the conn's forwarding state. On plan9 there is no monitor,
-// so it carries nothing.
-type fwdState struct{}
-
 // fwdDialUnix is the unix -L path. The gliderssh callback rejects on
 // plan9. See the file comment.
 func (c *conn) fwdDialUnix(ctx gliderssh.Context, socketPath string) (net.Conn, error) {
@@ -96,13 +92,10 @@ func removeAgentForwardingDir(dir string, lu *userMeta, logf logger.Logf) {
 	}
 }
 
-// closeFwdMonitor is a no-op on plan9 because there is no monitor.
-func (c *conn) closeFwdMonitor() {}
-
-// wireReverseForwarding installs plan9's reverse TCP forwarding
+// wireForwarding installs plan9's reverse TCP forwarding
 // handlers. They are today's gliderssh ForwardedTCPHandler plus the
 // mayReversePortForwardTo policy callback.
-func (c *conn) wireReverseForwarding(ss *gliderssh.Server) {
+func (c *conn) wireForwarding(ss *gliderssh.Server) {
 	ss.ReversePortForwardingCallback = c.mayReversePortForwardTo
 	fwdHandler := &gliderssh.ForwardedTCPHandler{}
 	ss.RequestHandlers["tcpip-forward"] = fwdHandler.HandleSSHRequest
