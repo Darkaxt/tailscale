@@ -75,18 +75,19 @@ func (f *forwarder) noteLocalDNSRecovery(fq *forwardQuery, active bool) bool {
 	return true
 }
 
-func (f *forwarder) sendLocalDNS(ctx context.Context, fq *forwardQuery, selected *dnstype.Resolver) ([]byte, error) {
+func (f *forwarder) sendLocalDNS(ctx context.Context, fq *forwardQuery, selected *dnstype.Resolver) (*Response, error) {
 	client, err := f.getLocalDoHClient(selected)
 	if err != nil {
 		return nil, err // unavailable Android source is not a transport outage
 	}
 	res, err := f.sendDoH(ctx, selected.Addr, client, fq.packet)
 	if err == nil {
-		if fq.localDefault && !localDNSResponseValid(fq.packet, res) {
+		if fq.localDefault && !localDNSResponseValid(fq.packet, res.Bs) {
 			return nil, errors.New("invalid local DNS response")
 		}
 		f.noteLocalDNSRecovery(fq, false)
-		return checkResponseSizeAndSetTC(res, fq.packet, fq.family, f.logf), nil
+		res.Bs = checkResponseSizeAndSetTC(res.Bs, fq.packet, fq.family, f.logf)
+		return res, nil
 	}
 	// Do not wrap transport errors: http errors can include the private URL.
 	f.mu.Lock()
@@ -101,9 +102,10 @@ func (f *forwarder) sendLocalDNS(ctx context.Context, fq *forwardQuery, selected
 	client, err = f.getLocalDoHClient(fallback)
 	if err == nil && ctx.Err() == nil {
 		res, err = f.sendDoH(ctx, fallback.Addr, client, fq.packet)
-		if err == nil && localDNSResponseValid(fq.packet, res) && ctx.Err() == nil {
+		if err == nil && localDNSResponseValid(fq.packet, res.Bs) && ctx.Err() == nil {
 			f.noteLocalDNSRecovery(fq, true)
-			return checkResponseSizeAndSetTC(res, fq.packet, fq.family, f.logf), nil
+			res.Bs = checkResponseSizeAndSetTC(res.Bs, fq.packet, fq.family, f.logf)
+			return res, nil
 		}
 	}
 	return nil, errors.New("local DoH and encrypted outage recovery failed")

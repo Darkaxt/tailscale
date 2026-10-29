@@ -122,7 +122,7 @@ func TestLocalDNSOutageRecovery(t *testing.T) {
 				cancel()
 			}
 			run := func() {
-				responses := make(chan packet, 1)
+				responses := make(chan *Response, 1)
 				var explicit []resolverAndDelay
 				if tt.explicit {
 					explicit = []resolverAndDelay{{name: selected}}
@@ -135,7 +135,7 @@ func TestLocalDNSOutageRecovery(t *testing.T) {
 					t.Fatal(err)
 				}
 				var response dns.Message
-				if err := response.Unpack((<-responses).bs); err != nil {
+				if err := response.Unpack((<-responses).Bs); err != nil {
 					t.Fatal(err)
 				}
 				if response.RCode != tt.wantCode {
@@ -194,7 +194,7 @@ func TestLocalDNSOutageReconfiguration(t *testing.T) {
 		<-release
 		return &http.Response{StatusCode: 503, Body: io.NopCloser(http.NoBody)}, nil
 	})}}
-	responses, done := make(chan packet, 1), make(chan error, 1)
+	responses, done := make(chan *Response, 1), make(chan error, 1)
 	go func() {
 		done <- f.forwardWithDestChan(t.Context(), packet{bs: makeTestRequest(t, "www.example.com.", dns.TypeA, 0), family: "udp"}, responses)
 	}()
@@ -245,7 +245,7 @@ func TestLocalDNSOutageProtectedNames(t *testing.T) {
 			t.Fatal(err)
 		}
 		var msg dns.Message
-		if err := msg.Unpack(response); err != nil {
+		if err := msg.Unpack(response.Bs); err != nil {
 			t.Fatal(err)
 		}
 		if msg.RCode != tt.code {
@@ -265,7 +265,7 @@ func TestLocalDNSOutageSameProvider(t *testing.T) {
 		calls.Add(1)
 		return &http.Response{StatusCode: 503, Body: http.NoBody}, nil
 	})}}
-	responses := make(chan packet, 1)
+	responses := make(chan *Response, 1)
 	if err := f.forwardWithDestChan(t.Context(), packet{bs: makeTestRequest(t, "example.com.", dns.TypeA, 0), family: "udp"}, responses); err != nil {
 		t.Fatal(err)
 	}
@@ -319,12 +319,12 @@ func TestLocalDNSOutageRecoveryLive(t *testing.T) {
 	})}}
 	ctx, cancel := context.WithTimeout(t.Context(), dnsQueryTimeout) // same existing DNS protocol boundary
 	defer cancel()
-	responses := make(chan packet, 1)
+	responses := make(chan *Response, 1)
 	if err := f.forwardWithDestChan(ctx, packet{bs: makeTestRequest(t, "example.com.", dns.TypeA, 0), family: "udp"}, responses); err != nil {
 		t.Fatal(err)
 	}
 	var answer dns.Message
-	if err := answer.Unpack((<-responses).bs); err != nil {
+	if err := answer.Unpack((<-responses).Bs); err != nil {
 		t.Fatal(err)
 	}
 	if answer.RCode != dns.RCodeSuccess || len(answer.Answers) == 0 {

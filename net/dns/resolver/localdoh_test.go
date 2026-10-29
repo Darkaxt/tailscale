@@ -28,7 +28,13 @@ import (
 
 type localDoHRoundTrip func(*http.Request) (*http.Response, error)
 
-func (fn localDoHRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return fn(r) }
+func (fn localDoHRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) {
+	response, err := fn(r)
+	if response != nil && response.Request == nil {
+		response.Request = r
+	}
+	return response, err
+}
 
 func TestLocalDoHUsesDedicatedTransport(t *testing.T) {
 	const endpoint = "https://resolver.example/secret-profile"
@@ -222,7 +228,7 @@ func TestLocalDoHLive(t *testing.T) {
 				t.Fatal(err)
 			}
 			var answer dns.Message
-			if err := answer.Unpack(response); err != nil {
+			if err := answer.Unpack(response.Bs); err != nil {
 				t.Fatal(err)
 			}
 			if !answer.Response || answer.RCode != dns.RCodeSuccess || len(answer.Answers) == 0 {
