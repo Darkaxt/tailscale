@@ -2360,7 +2360,7 @@ func TestForwarderHealthOnResolverFailure(t *testing.T) {
 				addr:   netip.MustParseAddrPort("127.0.0.1:12345"),
 			}
 
-			responseChan := make(chan packet, 1)
+			responseChan := make(chan *Response, 1)
 			if err := fwd.forwardWithDestChan(context.Background(), rpkt, responseChan, resolvers...); err != nil {
 				t.Fatalf("forwardWithDestChan: %v", err)
 			}
