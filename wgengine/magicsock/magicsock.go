@@ -1757,7 +1757,8 @@ func (c *Conn) mkReceiveFunc(cfg udpReceiveConfig) conn.ReceiveFunc {
 	ruc := cfg.ruc
 	directPacketMetric, peerRelayPacketMetric := cfg.directPackets, cfg.peerRelayPackets
 	directBytesMetric, peerRelayBytesMetric := cfg.directBytes, cfg.peerRelayBytes
-	healthItem := c.health.ReceiveFuncStats(c.receiveName(cfg.family, cfg.socket))
+	name := c.receiveName(cfg.family, cfg.socket)
+	healthItem := c.health.ReceiveFuncStats(name)
 	// epCache caches an epAddr->endpoint for hot flows.
 	var epCache epAddrEndpointCache
 	var batchingPackets []batching.ReceivedPacket
@@ -1766,12 +1767,12 @@ func (c *Conn) mkReceiveFunc(cfg udpReceiveConfig) conn.ReceiveFunc {
 		if buildfeatures.HasHealth && healthItem != nil {
 			healthItem.Enter()
 			defer healthItem.Exit()
-			defer func() {
-				if retErr != nil && !c.closing.Load() {
-					c.logf("Receive func %s exiting with error: %T, %v", healthItem.Name(), retErr, retErr)
-				}
-			}()
 		}
+		defer func() {
+			if retErr != nil && !c.closing.Load() {
+				c.logf("Receive func %s exiting with error: %T, %v", name, retErr, retErr)
+			}
+		}()
 		if ruc == nil {
 			panic("nil RebindingUDPConn")
 		}
@@ -1780,9 +1781,16 @@ func (c *Conn) mkReceiveFunc(cfg udpReceiveConfig) conn.ReceiveFunc {
 		}
 
 		for {
+			if c.connCtx.Err() != nil {
+				return 0, net.ErrClosed
+			}
 			numMsgs, err := ruc.ReadBatch(cfg.socket, slab, batchingPackets)
 			if err != nil {
 				if neterror.PacketWasTruncated(err) {
+					continue
+				}
+				if neterror.IsUDPReadFeedback(err) {
+					metricRecvUDPErrorReachability.Add(1)
 					continue
 				}
 				return 0, err
@@ -4341,6 +4349,9 @@ var (
 	metricSendPeerRelayError  = clientmetric.NewCounter("magicsock_send_peer_relay_error")
 	metricSendDERPError       = clientmetric.NewCounter("magicsock_send_derp_error")
 
+	// UDP reads matching neterror.IsUDPReadFeedback.
+	metricRecvUDPErrorReachability = clientmetric.NewCounter("magicsock_recv_udp_error_reachability")
+
 	// Sends (data)
 	//
 	// Note: Prior to v1.78 metricSendUDP & metricSendDERP counted sends of data
@@ -4650,11 +4661,11 @@ func (c *Conn) PeerRelays() set.Set[netip.Addr] {
 func (c *Conn) HandleDiscoKeyAdvertisement(node tailcfg.NodeView, update packet.TSMPDiscoKeyAdvertisement) {
 	discoKey := update.Key
 	if discoKey.IsZero() {
-		c.logf("[v1] magicsock: received zero disco key update from %v", node.StableID())
+		c.dlogf("[v1] magicsock: received zero disco key update from %v", node.StableID())
 		return
 	}
 
-	c.logf("[v1] magicsock: received disco key update %v from %v", discoKey.ShortString(), node.StableID())
+	c.dlogf("[v1] magicsock: received disco key update %v from %v", discoKey.ShortString(), node.StableID())
 	metricTSMPDiscoKeyAdvertisementReceived.Add(1)
 
 	c.mu.Lock()
@@ -4663,7 +4674,7 @@ func (c *Conn) HandleDiscoKeyAdvertisement(node tailcfg.NodeView, update packet.
 
 	ep, ok := c.peerMap.endpointForNodeKey(nodeKey)
 	if !ok {
-		c.logf("magicsock: endpoint not found for node %v", nodeKey.ShortString())
+		c.dlogf("[v1] magicsock: endpoint not found for node %v", nodeKey.ShortString())
 		return
 	}
 
@@ -4675,7 +4686,7 @@ func (c *Conn) HandleDiscoKeyAdvertisement(node tailcfg.NodeView, update packet.
 	// If the key did not change, count it and return.
 	if oldDiscoKey.Compare(discoKey) == 0 {
 		metricTSMPDiscoKeyAdvertisementUnchanged.Add(1)
-		c.logf("[v1] magicsock: disco key did not change for node %v", nodeKey.ShortString())
+		c.dlogf("[v1] magicsock: disco key did not change for node %v", nodeKey.ShortString())
 		return
 	}
 	c.discoInfoForKnownPeerLocked(discoKey)
