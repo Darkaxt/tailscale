@@ -404,7 +404,7 @@ func (c *Conn25) handleHookReplyToDNSQueries(h ipnlocal.PeerAPIHandler, r *http.
 	}
 
 	// Determine which app the query is for
-	var app appctype.Conn25Attr
+	var app appctype.AppConnectorAttr
 	if appName, hasApp := r.URL.Query()["app"]; !hasApp || len(appName) != 1 {
 		return false, nil
 	} else {
@@ -429,7 +429,7 @@ func (c *Conn25) handleHookReplyToDNSQueries(h ipnlocal.PeerAPIHandler, r *http.
 	return true, makeNameChecker(app)
 }
 
-func makeNameChecker(app appctype.Conn25Attr) ipnlocal.DNSNameFilter {
+func makeNameChecker(app appctype.AppConnectorAttr) ipnlocal.DNSNameFilter {
 	// TODO(tailscale/corp#40076): optimize the comparison; if the func is
 	// generated when the app config is created, that will avoid allocating
 	// temporary instances. Some of the work (e.g. conversion to [dnsname.FQDN])
@@ -745,7 +745,7 @@ type ConnectorTransitIPResponse struct {
 }
 
 const (
-	AppConnectorsExperimentalAttrName        = "tailscale.com/app-connectors-experimental"
+	AppConnectorAttrName                     = "tailscale.com/app-connectors"
 	AppConnectorsExperimentalIPPoolsAttrName = "tailscale.com/app-connectors-experimental-ippools"
 )
 
@@ -771,8 +771,8 @@ func emptyIPSets() ipSets {
 // config is not safe for concurrent use.
 type config struct {
 	isConfigured       bool
-	apps               []appctype.Conn25Attr
-	appsByName         map[string]appctype.Conn25Attr
+	apps               []appctype.AppConnectorAttr
+	appsByName         map[string]appctype.AppConnectorAttr
 	appNamesByDomain   map[dnsname.FQDN][]string
 	appNamesByWCDomain map[dnsname.FQDN][]string
 	selfAppNames       set.Set[string]
@@ -780,9 +780,17 @@ type config struct {
 }
 
 func configFromNodeView(n tailcfg.NodeView) (*config, error) {
-	apps, err := tailcfg.UnmarshalNodeCapViewJSON[appctype.Conn25Attr](n.CapMap(), AppConnectorsExperimentalAttrName)
+	// conn25 apps are provided under [AppConnectorAttrName] with the Mode
+	// field set to "magicip".
+	unfilteredApps, err := tailcfg.UnmarshalNodeCapViewJSON[appctype.AppConnectorAttr](n.CapMap(), AppConnectorAttrName)
 	if err != nil {
 		return &config{}, err
+	}
+	var apps []appctype.AppConnectorAttr
+	for _, app := range unfilteredApps {
+		if app.Mode == appctype.MagicIP {
+			apps = append(apps, app)
+		}
 	}
 	if len(apps) == 0 {
 		return &config{}, nil
@@ -799,7 +807,7 @@ func configFromNodeView(n tailcfg.NodeView) (*config, error) {
 	cfg := &config{
 		isConfigured:       true,
 		apps:               apps,
-		appsByName:         map[string]appctype.Conn25Attr{},
+		appsByName:         map[string]appctype.AppConnectorAttr{},
 		appNamesByDomain:   map[dnsname.FQDN][]string{},
 		appNamesByWCDomain: map[dnsname.FQDN][]string{},
 		selfAppNames:       set.Set[string]{},
@@ -953,7 +961,7 @@ func makePeerAPIReq(ctx context.Context, httpClient *http.Client, urlBase string
 	return nil
 }
 
-func (e *extension) pickConnectorURLBase(app appctype.Conn25Attr) string {
+func (e *extension) pickConnectorURLBase(app appctype.AppConnectorAttr) string {
 	nb := e.host.NodeBackend()
 	peers := pickConnector(nb, app)
 	for _, p := range peers {
@@ -1350,7 +1358,7 @@ func sortByPreference(self tailcfg.NodeView, ns []tailcfg.NodeView) {
 
 // pickConnector returns peers the backend knows about that match the app, in order of preference to use as
 // a connector.
-func pickConnector(nb ipnext.NodeBackend, app appctype.Conn25Attr) []tailcfg.NodeView {
+func pickConnector(nb ipnext.NodeBackend, app appctype.AppConnectorAttr) []tailcfg.NodeView {
 	appTagsSet := set.SetOf(app.Connectors)
 	matches := nb.AppendMatchingPeers(nil, func(n tailcfg.NodeView) bool {
 		if !isPeerEligibleConnector(n) {
