@@ -37,6 +37,7 @@ import (
 
 	"tailscale.com/ipn"
 	tsapi "tailscale.com/k8s-operator/apis/v1alpha1"
+	"tailscale.com/k8s-operator/reconciler/tailscaled"
 	"tailscale.com/k8s-operator/tsclient"
 	"tailscale.com/kube/kubetypes"
 	"tailscale.com/types/key"
@@ -48,6 +49,8 @@ const (
 
 	// tsNamespace is the namespace the operator is installed in for tests that don't override it.
 	tsNamespace = "tailscale"
+
+	optimisticLockErrorMsg = "the object has been modified; please apply your changes to the latest version and try again"
 )
 
 // confgOpts contains configuration options for creating cluster resources for
@@ -449,7 +452,7 @@ func expectedMetricsService(opts configOpts) *corev1.Service {
 	}
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      metricsResourceName(opts.stsName),
+			Name:      tailscaled.MetricsResourceName(opts.stsName),
 			Namespace: opts.tailscaleNamespace,
 			Labels:    labels,
 		},
@@ -483,10 +486,11 @@ func expectedServiceMonitor(t *testing.T, opts configOpts) *unstructured.Unstruc
 	t.Helper()
 	smLabels := metricsLabels(opts)
 	if len(opts.serviceMonitorLabels) != 0 {
-		smLabels = mergeMapKeys(smLabels, opts.serviceMonitorLabels.Parse())
+		smLabels = opts.serviceMonitorLabels.Parse()
+		maps.Copy(smLabels, metricsLabels(opts))
 	}
-	name := metricsResourceName(opts.stsName)
-	sm := &ServiceMonitor{
+	name := tailscaled.MetricsResourceName(opts.stsName)
+	sm := &tailscaled.ServiceMonitor{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            name,
 			Namespace:       opts.tailscaleNamespace,
@@ -498,12 +502,12 @@ func expectedServiceMonitor(t *testing.T, opts configOpts) *unstructured.Unstruc
 			Kind:       "ServiceMonitor",
 			APIVersion: "monitoring.coreos.com/v1",
 		},
-		Spec: ServiceMonitorSpec{
+		Spec: tailscaled.ServiceMonitorSpec{
 			Selector: metav1.LabelSelector{MatchLabels: metricsLabels(opts)},
-			Endpoints: []ServiceMonitorEndpoint{{
+			Endpoints: []tailscaled.ServiceMonitorEndpoint{{
 				Port: "metrics",
 			}},
-			NamespaceSelector: ServiceMonitorNamespaceSelector{
+			NamespaceSelector: tailscaled.ServiceMonitorNamespaceSelector{
 				MatchNames: []string{opts.tailscaleNamespace},
 			},
 			JobLabel: "ts_prom_job",
@@ -514,7 +518,7 @@ func expectedServiceMonitor(t *testing.T, opts configOpts) *unstructured.Unstruc
 			},
 		},
 	}
-	u, err := serviceMonitorToUnstructured(sm)
+	u, err := tailscaled.ServiceMonitorToUnstructured(sm)
 	if err != nil {
 		t.Fatalf("error converting ServiceMonitor to unstructured: %v", err)
 	}

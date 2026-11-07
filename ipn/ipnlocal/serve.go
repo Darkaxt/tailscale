@@ -842,11 +842,16 @@ func (b *LocalBackend) getServeHandler(r *http.Request) (_ ipn.HTTPHandlerView, 
 		if host, _, err := net.SplitHostPort(hostname); err == nil {
 			hostname = host
 		}
+		// DNS names are case-insensitive, and a trailing dot marks a name
+		// as fully qualified. Serve config keys are lowercase with no
+		// trailing dot, so normalize the Host header to match.
+		hostname = strings.ToLower(strings.TrimSuffix(hostname, "."))
 		if !strings.HasSuffix(hostname, tcd) {
 			hostname += tcd
 		}
 	} else {
-		hostname = r.TLS.ServerName
+		// TLS rejects a trailing dot in SNI but does not lowercase it.
+		hostname = strings.ToLower(r.TLS.ServerName)
 	}
 
 	sctx, ok := serveHTTPContextKey.ValueOk(r.Context())
@@ -1358,20 +1363,41 @@ func (b *LocalBackend) serveFileOrDirectory(w http.ResponseWriter, r *http.Reque
 	fs.ServeHTTP(&fixLocationHeaderResponseWriter{
 		ResponseWriter: w,
 		mountPoint:     mountPoint,
+		reqPath:        r.URL.Path,
 	}, r)
 }
 
 // fixLocationHeaderResponseWriter is an http.ResponseWriter wrapper that, upon
-// flushing HTTP headers, prefixes any Location header with the mount point.
+// flushing HTTP headers, rewrites any Location header to be under the mount
+// point. http.FileServer sends redirects relative to the (prefix-stripped)
+// request URL, so a relative Location is resolved against the original request
+// path.
 type fixLocationHeaderResponseWriter struct {
 	http.ResponseWriter
 	mountPoint string
+	reqPath    string    // original request path, before the mount point is stripped
 	fixOnce    sync.Once // guards call to fix
 }
 
 func (w *fixLocationHeaderResponseWriter) fix() {
 	h := w.ResponseWriter.Header()
 	if v := h.Get("Location"); v != "" {
+		if ref, err := url.Parse(v); err == nil && ref.Scheme == "" && ref.Host == "" && !strings.HasPrefix(v, "/") && strings.HasPrefix(w.reqPath, w.mountPoint) {
+			// Resolve against the original request path, which keeps any
+			// parent directories below the mount point and removes dot
+			// segments. The query string, if any, is carried along.
+			u := (&url.URL{Path: w.reqPath}).ResolveReference(ref)
+			loc := u.EscapedPath()
+			if u.RawQuery != "" {
+				loc += "?" + u.RawQuery
+			}
+			// Collapse leading slashes so a request path like "//foo"
+			// can't produce a protocol-relative Location.
+			h.Set("Location", "/"+strings.TrimLeft(loc, "/"))
+			return
+		}
+		// Not expected from http.FileServer, which only sends relative
+		// Locations; kept as a safety net.
 		h.Set("Location", w.mountPoint+v)
 	}
 }
@@ -1446,14 +1472,19 @@ func (b *LocalBackend) getTLSServeCertForPort(port uint16, forVIPService tailcfg
 		if cert, ok := b.getACMETLSALPNCert(hi); ok {
 			return cert, nil
 		}
-		_, ok := b.webServerConfig(hi.ServerName, forVIPService, port)
+		// Serve config keys and cert domains are lowercase; SNI is not
+		// guaranteed to be. The ACME challenge lookup above keeps the
+		// name as sent, since it is matched against the name the ACME
+		// server dials.
+		name := strings.ToLower(hi.ServerName)
+		_, ok := b.webServerConfig(name, forVIPService, port)
 		if !ok {
 			return nil, errors.New("no webserver configured for name/port")
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		pair, err := b.GetCertPEM(ctx, hi.ServerName)
+		pair, err := b.GetCertPEM(ctx, name)
 		if err != nil {
 			return nil, err
 		}
