@@ -121,7 +121,7 @@
         # things, but for now, we hardcode the default of port 41641 (taken from
         # ./cmd/tailscaled/tailscaled.defaults).
         postInstall =
-          pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+          pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
             wrapProgram $out/bin/tailscaled --prefix PATH : ${pkgs.lib.makeBinPath [pkgs.iproute2 pkgs.iptables pkgs.getent pkgs.shadow]}
             wrapProgram $out/bin/tailscale --suffix PATH : ${pkgs.lib.makeBinPath [pkgs.procps]}
 
@@ -173,4 +173,4 @@
     });
   };
 }
-# nix-direnv cache busting line: sha256-tggEwThh7HDLv6kDuLF+n35wejmsJjduve4zASIneV4=
+# nix-direnv cache busting line: sha256-M7jMKZAikFtuHU7GZ1TBUme1cHrgKcg3LQObcXoXImU=
