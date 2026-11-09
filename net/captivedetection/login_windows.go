@@ -24,12 +24,33 @@ type LoginNetwork struct {
 }
 
 func WindowsLoginNetwork() (LoginNetwork, error) {
-	a, err := netmon.GetWindowsDefault(windows.AF_INET)
+	iface, err := netmon.GetWindowsDefault(windows.AF_INET)
 	if err != nil {
 		return LoginNetwork{}, err
 	}
-	if a == nil || (a.IfType != winipcfg.IfTypeEthernetCSMACD && a.IfType != winipcfg.IfTypeIEEE80211) {
+	if iface == nil || (iface.Type != winipcfg.IfTypeEthernetCSMACD && iface.Type != winipcfg.IfTypeIEEE80211) {
 		return LoginNetwork{}, nil
+	}
+	adapters, err := winipcfg.GetAdaptersAddresses(windows.AF_INET, winipcfg.GAAFlagIncludeAllInterfaces)
+	if err != nil {
+		return LoginNetwork{}, err
+	}
+	return loginNetworkForInterface(iface.InterfaceLUID, adapters), nil
+}
+
+// loginNetworkForInterface joins the selected route interface to its address
+// snapshot by LUID. If it disappeared between the two queries, there is no
+// current login network; never substitute a different adapter's DNS or identity.
+func loginNetworkForInterface(luid winipcfg.LUID, adapters []*winipcfg.IPAdapterAddresses) LoginNetwork {
+	var a *winipcfg.IPAdapterAddresses
+	for _, adapter := range adapters {
+		if adapter.LUID == luid {
+			a = adapter
+			break
+		}
+	}
+	if a == nil {
+		return LoginNetwork{}
 	}
 	n := LoginNetwork{Index: int(a.IfIndex)}
 	identity := []string{fmt.Sprint(a.LUID), a.NetworkGUID.String()}
@@ -56,5 +77,5 @@ func WindowsLoginNetwork() (LoginNetwork, error) {
 	}
 	sort.Strings(identity)
 	n.Key = fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprint(identity))))
-	return n, nil
+	return n
 }
