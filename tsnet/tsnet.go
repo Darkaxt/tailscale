@@ -1114,7 +1114,7 @@ func (s *Server) resolveAuthKey() (string, error) {
 }
 
 func (s *Server) startLogger(closePool *closeOnErrorPool, health *health.Tracker, tsLogf logger.Logf) error {
-	if testenv.InTest() {
+	if !buildfeatures.HasLogTail || testenv.InTest() {
 		return nil
 	}
 	cfgPath := filepath.Join(s.rootPath, "tailscaled.log.conf")
@@ -1512,18 +1512,6 @@ func (s *Server) RegisterFallbackTCPHandler(cb FallbackTCPHandler) func() {
 		defer s.mu.Unlock()
 		delete(s.fallbackTCPHandlers, hnd)
 	}
-}
-
-// getCert is the GetCertificate function used by ListenTLS.
-//
-// It calls GetCertificate on the localClient, passing in the ClientHelloInfo.
-// For testing, if s.getCertForTesting is set, it will call that instead.
-func (s *Server) getCert(hi *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	lc, err := s.LocalClient()
-	if err != nil {
-		return nil, err
-	}
-	return lc.GetCertificate(hi)
 }
 
 // FunnelOption is an option passed to ListenFunnel to configure the listener.
