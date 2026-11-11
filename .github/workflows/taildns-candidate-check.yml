@@ -23,8 +23,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python3 -m unittest discover -s tool -p taildns_candidate_test.py -v
           go_bin="$(./tool/go env GOROOT)/bin/go"
-          "$go_bin" test -mod=readonly ./ipn/... ./net/dns/... ./client/local ./cmd/taildns ./safesocket -count=1
+          "$go_bin" test -mod=readonly ./ipn/... ./net/dns/... ./net/captivedetection ./client/local ./cmd/taildns ./safesocket -count=1
           env CGO_ENABLED=0 GOOS=windows GOARCH=amd64 "$go_bin" build -trimpath -o "$RUNNER_TEMP/taildns.exe" ./cmd/taildns
           env CGO_ENABLED=0 GOOS=windows GOARCH=amd64 "$go_bin" build -trimpath -o "$RUNNER_TEMP/taildnsd.exe" ./cmd/tailscaled
           env CGO_ENABLED=0 GOOS=windows GOARCH=amd64 "$go_bin" build -trimpath -o "$RUNNER_TEMP/tailscale.exe" ./cmd/tailscale

@@ -58,13 +58,22 @@ jobs:
           fi
           git checkout -B "$branch" "$base_head"
           if ! git merge --no-ff --no-edit "$upstream_head"; then
-            {
-              echo
-              echo 'Merge conflict; no branch, pull request, tag, release, or signing job was created.'
-              git diff --name-only --diff-filter=U
-            } >> "$GITHUB_STEP_SUMMARY"
-            git merge --abort || true
-            exit 1
+            # Fork-owned workflow policy is restored for successful merges below
+            # too. Resolve only that policy boundary before judging source conflicts.
+            # Clear conflicted canonical paths, including workflows deleted by
+            # the fork, then restore the exact reviewed base directory.
+            git rm -r -f --ignore-unmatch -- .github/workflows
+            git restore --source="$base_head" --staged --worktree -- .github/workflows
+            if [[ -n "$(git diff --name-only --diff-filter=U)" ]]; then
+              {
+                echo
+                echo 'Source merge conflict; no branch, pull request, tag, release, or signing job was created.'
+                git diff --name-only --diff-filter=U
+              } >> "$GITHUB_STEP_SUMMARY"
+              git merge --abort || true
+              exit 1
+            fi
+            git commit --no-edit
           fi
           if ! git diff --quiet "$base_head" HEAD -- .github/workflows; then
             {
@@ -74,6 +83,7 @@ jobs:
               echo
               echo 'The fork keeps its reviewed workflow policy; runtime source changes remain in the candidate.'
             } >> "$GITHUB_STEP_SUMMARY"
+            git rm -r -f --ignore-unmatch -- .github/workflows
             git restore --source="$base_head" --staged --worktree -- .github/workflows
             git commit -m 'preserve TailDNS workflow policy'
           fi
