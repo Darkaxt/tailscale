@@ -64,6 +64,7 @@ jobs:
             # the fork, then restore the exact reviewed base directory.
             git rm -r -f --ignore-unmatch -- .github/workflows
             git restore --source="$base_head" --staged --worktree -- .github/workflows
+            python3 tool/taildns_reconcile_upstream.py "$upstream_head"
             if [[ -n "$(git diff --name-only --diff-filter=U)" ]]; then
               {
                 echo

@@ -1,6 +1,7 @@
 """Exercise the real workflow composition boundary with synthetic Git histories."""
 import os,shutil,subprocess,tempfile,unittest
 from pathlib import Path
+import taildns_reconcile_upstream as reconcile
 
 ROOT=Path(__file__).resolve().parents[1]
 WORKFLOW=Path(os.environ.get('TAILDNS_CANDIDATE_WORKFLOW',ROOT/'.github/workflows/taildns-upstream-candidate.yml'))
@@ -17,6 +18,8 @@ class CandidatePolicyTest(unittest.TestCase):
         self.git('init','-b','main')
         self.git('config','user.name','TailDNS synthetic regression')
         self.git('config','user.email','synthetic@example.invalid')
+        (self.repo/'tool').mkdir()
+        shutil.copyfile(ROOT/'tool/taildns_reconcile_upstream.py',self.repo/'tool/taildns_reconcile_upstream.py')
         self.workflows=self.repo/'.github/workflows';self.workflows.mkdir(parents=True)
         self.workflow=self.workflows/'natlab-test.yml';self.workflow.write_text('policy: common\n')
         (self.workflows/'windows-nightly.yml').write_text('nightly: common\n')
@@ -73,5 +76,18 @@ class CandidatePolicyTest(unittest.TestCase):
         self.assertEqual(self.git('diff',self.base,'HEAD','--','.github/workflows'),'')
         self.assertEqual((self.repo/'shared.txt').read_text(),'canonical source\n')
         self.git('merge-base','--is-ancestor',self.upstream,'HEAD')
+
+    def test_exact_captive_hunk_preserves_nonconflicting_merged_edits(self):
+        upstream='c31b4c133d277c45c7fa6a4b18d5e122437d26e5'
+        block=b'<<<<<<< HEAD\n'+reconcile.FORK_LINE+b'=======\n'+reconcile.CANONICAL_LINE+b'>>>>>>> '+upstream.encode()+b'\n'
+        merged=b'nonconflicting canonical prefix\n'+block+b'nonconflicting fork suffix\n'
+        expected=b'nonconflicting canonical prefix\n'+reconcile.FORK_LINE+b'nonconflicting fork suffix\n'
+        self.assertEqual(reconcile.resolve(reconcile.REVIEWED,merged,upstream),expected)
+        for index in range(3):
+            blobs=list(reconcile.REVIEWED);blobs[index]='0'*40
+            with self.assertRaisesRegex(RuntimeError,'unreviewed-captive-merge-input'):
+                reconcile.resolve(blobs,merged,upstream)
+        with self.assertRaisesRegex(RuntimeError,'unreviewed-captive-conflict-hunk'):
+            reconcile.resolve(reconcile.REVIEWED,merged+block,upstream)
 
 if __name__=='__main__':unittest.main()
