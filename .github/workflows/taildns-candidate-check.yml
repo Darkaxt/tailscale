@@ -25,7 +25,21 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s tool -p taildns_candidate_test.py -v
           go_bin="$(./tool/go env GOROOT)/bin/go"
-          "$go_bin" test -mod=readonly ./ipn/... ./net/dns/... ./net/captivedetection ./net/netns ./net/tsdial ./tsnet ./tstime ./client/local ./cmd/taildns ./safesocket -count=1
+          "$go_bin" test -mod=readonly -p=2 ./ipn/... ./net/dns/... ./net/captivedetection ./net/netns ./net/tsdial ./tsnet ./tstime ./envknob ./health ./net/neterror ./net/tstun ./wgengine ./wgengine/magicsock ./feature/acme ./cmd/k8s-proxy ./k8s-operator/api-proxy ./tstest/natlab/vnet ./util/syspolicy/source ./client/local ./cmd/taildns ./safesocket -count=1
           env CGO_ENABLED=0 GOOS=windows GOARCH=amd64 "$go_bin" build -trimpath -o "$RUNNER_TEMP/taildns.exe" ./cmd/taildns
           env CGO_ENABLED=0 GOOS=windows GOARCH=amd64 "$go_bin" build -trimpath -o "$RUNNER_TEMP/taildnsd.exe" ./cmd/tailscaled
           env CGO_ENABLED=0 GOOS=windows GOARCH=amd64 "$go_bin" build -trimpath -o "$RUNNER_TEMP/tailscale.exe" ./cmd/tailscale
+
+  verify-windows-policy:
+    if: (github.actor == github.repository_owner || github.actor == 'github-actions[bot]') && inputs.candidate_ref == 'automation/upstream-core'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.candidate_ref }}
+      - name: Verify changed Windows policy storage without secrets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\tool\go.exe test -mod=readonly -p=2 ./util/syspolicy/source -run '^TestReadPolicyStore$' -count=1 -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
