@@ -207,6 +207,8 @@ type watchSession struct {
 	// this session via [Notify.SelfChange]. A change to self is a profile
 	// boundary for implicit bus state, so per-session dedup state such as
 	// lastSentUserProfile must be reset when this identity changes.
+	// It is itself reset on a profile change, as the new profile may
+	// have no self node.
 	lastSentSelf tailcfg.NodeView
 
 	// policyUID is the user ID used for policy snapshot scoping.
@@ -2606,7 +2608,12 @@ func (b *LocalBackend) UpdateNetmapDelta(muts []netmap.NodeMutation) (handled bo
 	muts = b.tkaFilterDeltaMutsLocked(muts)
 	needsAuthReconfig := netmapDeltaNeedsAuthReconfig(cn, muts)
 
-	deltaRes, _ := cn.UpdateNetmapDelta(muts)
+	deltaRes, ok := cn.UpdateNetmapDelta(muts)
+	if !ok {
+		// Returning false makes controlclient deliver a full netmap
+		// instead.
+		return false
+	}
 	b.notifyPeerUpdateLocked()
 	b.checkCachedDNSLocked()
 	if buildfeatures.HasDrive {
@@ -2953,12 +2960,11 @@ func mutationsAreWorthyOfRecalculatingSuggestedExitNode(muts []netmap.NodeMutati
 			continue
 		}
 
-		// Some exit node is being mutated.  We care about it if it's online
-		// or offline state has changed.  We *might* eventually care about it for other reasons
-		// but for the sake of finding a "better" suggested exit node, this is probably
-		// sufficient.
+		// Some exit node is being mutated.  We care about it if its online
+		// or offline state has changed, or its DERP home, which
+		// [suggestExitNode] uses to group candidates by region.
 		switch m.(type) {
-		case netmap.NodeMutationOnline:
+		case netmap.NodeMutationOnline, netmap.NodeMutationDERPHome:
 			return true
 		}
 	}
@@ -8894,6 +8900,14 @@ func (b *LocalBackend) resetForProfileChangeLocked() error {
 		return nil
 	}
 	b.closeDiskCacheLocked()
+	// IPN bus watchers may drop the old node's implicit bus state
+	// on a profile switch, and the new profile may never deliver
+	// a self node to mark the boundary, such as when the new profile's
+	// node key has expired.
+	for _, sess := range b.notifyWatchers {
+		sess.lastSentUserProfile = nil
+		sess.lastSentSelf = tailcfg.NodeView{}
+	}
 	if buildfeatures.HasDNS {
 		if dm, ok := b.sys.DNSManager.GetOK(); ok {
 			dm.Resolver().ClearNegativeCache()

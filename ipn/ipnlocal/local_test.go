@@ -3316,6 +3316,41 @@ func TestNotifyForSessionUserProfilesDedupResetsOnSelfChange(t *testing.T) {
 	}
 }
 
+// TestNotifyForSessionUserProfilesDedupResetsOnProfileChange tests that
+// user profiles are resent after switching to a profile that never gets
+// a self node, such as a logged out one, and back.
+func TestNotifyForSessionUserProfilesDedupResetsOnProfileChange(t *testing.T) {
+	b := newTestLocalBackend(t)
+
+	sess := &watchSession{
+		sessionID: "test-session",
+		ctx:       t.Context(),
+		mask:      ipn.NotifyPeerChanges,
+		ch:        make(chan *ipn.Notify, 100),
+	}
+	self := &tailcfg.Node{ID: 1, StableID: "self", User: 10}
+	profiles := map[tailcfg.UserID]tailcfg.UserProfileView{
+		10: (&tailcfg.UserProfile{ID: 10, LoginName: "alice@example.com", DisplayName: "Alice"}).View(),
+		11: (&tailcfg.UserProfile{ID: 11, LoginName: "tagged-devices", DisplayName: "Tagged Devices"}).View(),
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	mak.Set(&b.notifyWatchers, sess.sessionID, sess)
+
+	n := b.notifyForSessionLocked(sess, &ipn.Notify{SelfChange: self, UserProfiles: profiles})
+	if got, want := len(n.UserProfiles), len(profiles); got != want {
+		t.Fatalf("initial UserProfiles len = %d; want %d", got, want)
+	}
+	if err := b.resetForProfileChangeLocked(); err != nil {
+		t.Fatal(err)
+	}
+	n = b.notifyForSessionLocked(sess, &ipn.Notify{SelfChange: self, UserProfiles: profiles})
+	if got, want := len(n.UserProfiles), len(profiles); got != want {
+		t.Fatalf("UserProfiles len after profile change = %d; want %d", got, want)
+	}
+}
+
 // tests LocalBackend.updateNetmapDeltaLocked
 func TestUpdateNetmapDelta(t *testing.T) {
 	b := newTestLocalBackend(t)
@@ -6305,6 +6340,38 @@ func deterministicNodeForTest(t testing.TB, want views.Slice[tailcfg.StableNodeI
 		}
 
 		return ret
+	}
+}
+
+func TestMutationsAreWorthyOfRecalculatingSuggestedExitNode(t *testing.T) {
+	nb := newNodeBackend(t.Context(), tstest.WhileTestRunningLogger(t), eventbus.New())
+	nb.SetNetMap(&netmap.NetworkMap{Peers: []tailcfg.NodeView{
+		(&tailcfg.Node{ID: 1, StableID: "exit", AllowedIPs: tsaddr.ExitRoutes()}).View(),
+		(&tailcfg.Node{ID: 2, StableID: "other"}).View(),
+	}})
+
+	tests := []struct {
+		name   string
+		change tailcfg.PeerChange
+		sid    tailcfg.StableNodeID
+		want   bool
+	}{
+		{"exit-online", tailcfg.PeerChange{NodeID: 1, Online: new(true)}, "", true},
+		{"exit-derp", tailcfg.PeerChange{NodeID: 1, DERPRegion: 2}, "", true},
+		{"exit-lastseen", tailcfg.PeerChange{NodeID: 1, LastSeen: new(time.Now())}, "", false},
+		{"other-derp", tailcfg.PeerChange{NodeID: 2, DERPRegion: 2}, "", false},
+		{"suggested-lastseen", tailcfg.PeerChange{NodeID: 2, LastSeen: new(time.Now())}, "other", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			muts, ok := netmap.NodeMutationsFromPatch(&tt.change)
+			if !ok {
+				t.Fatal("NodeMutationsFromPatch failed")
+			}
+			if got := mutationsAreWorthyOfRecalculatingSuggestedExitNode(muts, nb, tt.sid); got != tt.want {
+				t.Errorf("got %v; want %v", got, tt.want)
+			}
+		})
 	}
 }
 
