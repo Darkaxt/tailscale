@@ -126,7 +126,7 @@ require (
 	github.com/tailscale/ts-gokrazy v0.0.0-20260630224145-b83088f2e52e
 	github.com/tailscale/web-client-prebuilt v0.0.0-20260917222731-e0ed2d0d0fea
 	github.com/tailscale/wf v0.0.0-20240214030419-6fbb0a674ee6
-	github.com/tailscale/wireguard-go v0.0.0-20261116233941-c90940ef3f06
+	github.com/tailscale/wireguard-go v0.0.0-20261117232807-a1800e9c5305
 	github.com/tailscale/xnet v0.0.0-20240729143630-8497ac4dab2e
 	github.com/tc-hib/winres v0.3.1
 	github.com/tcnksm/go-httpstat v0.2.0
@@ -153,7 +153,7 @@ require (
 	golang.zx2c4.com/wireguard v0.0.0-20260522210424-ecfc5a8d5446
 	golang.zx2c4.com/wireguard/windows v1.0.1
 	gopkg.in/yaml.v3 v3.0.1
-	gvisor.dev/gvisor v0.0.0-20260915211658-a6f909f08a72
+	gvisor.dev/gvisor v0.0.0-20261117040555-0303b2605d5e
 	helm.sh/helm/v3 v3.21.4
 	honnef.co/go/tools v0.8.1
 	k8s.io/api v0.37.0

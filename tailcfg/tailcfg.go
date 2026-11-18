@@ -200,7 +200,8 @@ type CapabilityVersion int
 //   - 149: 2026-10-07: Sentinel version to request the server send back [NodeAttrCacheNetworkMaps] set to enabled
 //   - 150: 2026-10-13: Client handles app connectors with "mode": "magicip" as conn25.
 //   - 151: 2026-11-13: Client understands [nodecap.LogUploadAuth] for authenticated log uploads
-const CurrentCapabilityVersion CapabilityVersion = 151
+//   - 152: 2026-11-17: Client supports hybrid post-quantum handshakes
+const CurrentCapabilityVersion CapabilityVersion = 152
 
 // ID is an integer ID for a user, node, or login allocated by the
 // control plane.
@@ -272,6 +273,17 @@ func (u StableNodeID) IsZero() bool {
 type StableTailnetID string
 
 func (id StableTailnetID) IsZero() bool {
+	return id == ""
+}
+
+// StableVIPServiceID is the stable and opaque identifier of a [VIPService].
+// Unlike its [ServiceName], it is never reused: a service that is deleted and
+// recreated with the same name gets a new ID. These IDs are guaranteed to be
+// unique across all services for a single control server instance, but may or
+// may not be unique across different servers.
+type StableVIPServiceID string
+
+func (id StableVIPServiceID) IsZero() bool {
 	return id == ""
 }
 
@@ -632,6 +644,16 @@ func (n *Node) IsRouter() bool {
 		}
 	}
 	return false
+}
+
+// IsConn25Connector reports whether n is a conn25 connector.
+func (n *Node) IsConn25Connector() bool {
+	return n.HasCap(nodecap.Conn25Connector)
+}
+
+// IsConn25Connector reports whether v is a conn25 connector.
+func (v NodeView) IsConn25Connector() bool {
+	return v.ж.IsConn25Connector()
 }
 
 // IsTagged reports whether the node has any tags.
