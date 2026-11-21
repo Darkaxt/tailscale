@@ -2211,23 +2211,21 @@ const (
 //     Geneve header where the LSB is always 0 (part of 6 "reserved" bits).
 //
 //  2. STUN binding @ msg[1] (0x01) is sufficiently non-overlapping with naked
-//     WireGuard, which is always a 0 byte value (WireGuard message type
-//     occupies msg[0:4], and msg[1:4] are always 0).
+//     WireGuard (0x00).
 //
-//  3. STUN binding @ msg[1] (0x01) is sufficiently non-overlapping with the
-//     second byte of [disco.Magic] (0x53).
+//  3. STUN binding @ msg[1] (0x01) is sufficiently non-overlapping with
+//     [disco.Magic] (0x53).
 //
-//  4. [disco.Magic] @ msg[2:4] (0xf09f) is sufficiently non-overlapping with a
-//     Geneve protocol field value of [packet.GeneveProtocolDisco] or
-//     [packet.GeneveProtocolWireGuard] .
+//  4. [disco.Magic] @ msg[2] (0xf0) is sufficiently non-overlapping with a
+//     Geneve protocol field value of [packet.GeneveProtocolDisco] (0x7a) or
+//     [packet.GeneveProtocolWireGuard] (0x7a).
 //
-//  5. [disco.Magic] @ msg[0] (0x54) is sufficiently non-overlapping with the
-//     first byte of a WireGuard packet (0x01-0x04).
+//  5. [disco.Magic] @ msg[0] (0x54) is sufficiently non-overlapping with
+//     WireGuard (0x01-0x04).
 //
-//  6. [packet.GeneveHeader] with a Geneve protocol field value of
-//     [packet.GeneveProtocolDisco] or [packet.GeneveProtocolWireGuard]
-//     (msg[2:4]) is sufficiently non-overlapping with the second 2 bytes of a
-//     WireGuard packet which are always 0x0000.
+//  6. [packet.GeneveHeader] with a Geneve protocol field value starting with (msg[2])
+//     [packet.GeneveProtocolDisco] (0x7a) or [packet.GeneveProtocolWireGuard] (0x7a)
+//     is sufficiently non-overlapping with naked WireGuard (0x00).
 func packetLooksLike(msg []byte) (t packetLooksLikeType, isGeneveEncap bool) {
 	if stun.Is(msg) &&
 		msg[1] == 0x01 { // method binding
@@ -2256,9 +2254,9 @@ func packetLooksLike(msg []byte) (t packetLooksLikeType, isGeneveEncap bool) {
 				// The Geneve header is well-formed, and it indicated this
 				// was disco, but it's not. The evaluated bytes at this point
 				// are always distinct from naked WireGuard (msg[2:4] are always
-				// 0x0000) and naked Disco (msg[2:4] are always 0xf09f), but
-				// maintain pre-Geneve behavior and fall back to assuming it's
-				// naked WireGuard.
+				// 0x0000 or 0x0080 w/retry bit set) and naked Disco (msg[2:4]
+				// are always 0xf09f), but maintain pre-Geneve behavior and fall
+				// back to assuming it's naked WireGuard.
 				return packetLooksLikeWireGuard, false
 			}
 		case packet.GeneveProtocolWireGuard:
@@ -3965,6 +3963,13 @@ func (c *Conn) bindSocket(ruc *RebindingUDPConn, network string, curPortFate cur
 	// from the perspective of ruc receive functions.
 	ruc.mu.Lock()
 	defer ruc.mu.Unlock()
+	defer func() {
+		m := metricUDPSocketsIPv4
+		if network == "udp6" {
+			m = metricUDPSocketsIPv6
+		}
+		m.Set(int64(ruc.group.bound))
+	}()
 
 	if c.closing.Load() {
 		return net.ErrClosed
@@ -4450,6 +4455,9 @@ type discoInfo struct {
 var (
 	metricNumPeers     = clientmetric.NewGauge("magicsock_netmap_num_peers")
 	metricNumDERPConns = clientmetric.NewGauge("magicsock_num_derp_conns")
+
+	metricUDPSocketsIPv4 = clientmetric.NewGauge("magicsock_udp_sockets_ipv4")
+	metricUDPSocketsIPv6 = clientmetric.NewGauge("magicsock_udp_sockets_ipv6")
 
 	metricRebindCalls     = clientmetric.NewCounter("magicsock_rebind_calls")
 	metricReSTUNCalls     = clientmetric.NewCounter("magicsock_restun_calls")
