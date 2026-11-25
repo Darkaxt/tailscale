@@ -1680,6 +1680,34 @@ func TestPerClientRateLimit(t *testing.T) {
 	})
 }
 
+// BenchmarkRateLimit measures the per-frame cost of [sclient.rateLimit], which
+// is called on every received DERP frame.
+func BenchmarkRateLimit(b *testing.B) {
+	const frameSize = 1000
+	b.Run("no_limiter", func(b *testing.B) {
+		// Rate limiting disabled, mesh peer, or exempt address.
+		c := &sclient{ctx: context.Background()}
+		b.ReportAllocs()
+		for b.Loop() {
+			if err := c.rateLimit(frameSize); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("limiter_no_wait", func(b *testing.B) {
+		s := New(key.NewNode(), logger.Discard)
+		defer s.Close()
+		c := &sclient{ctx: context.Background(), s: s}
+		c.recvLim.Store(rate.NewLimiter(rate.Inf, minRateLimitTokenBucketSize))
+		b.ReportAllocs()
+		for b.Loop() {
+			if err := c.rateLimit(frameSize); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
 // zeroTimer returns a timer that fires immediately.
 func zeroTimer(_ time.Duration) (<-chan time.Time, func() bool) {
 	t := time.NewTimer(0)
@@ -1884,6 +1912,90 @@ func TestUpdateRateLimits(t *testing.T) {
 	}
 }
 
+func TestRateLimitExemptAddrs(t *testing.T) {
+	const (
+		testRate  = minRateLimitTokenBucketSize + 1
+		testBurst = minRateLimitTokenBucketSize + 2
+	)
+	wantLimited := func(t *testing.T, name string, c *sclient, limited bool) {
+		t.Helper()
+		lim := c.recvLim.Load()
+		if limited && lim == nil {
+			t.Errorf("%s: expected non-nil limiter", name)
+		}
+		if !limited && lim != nil {
+			t.Errorf("%s: expected nil limiter (exempt), got limit=%v", name, lim.Limit())
+		}
+	}
+
+	s := New(key.NewNode(), t.Logf)
+	defer s.Close()
+
+	// Clients registered before any rate config is applied.
+	v4 := addDebugTestClient(s, key.NewNode().Public(), "203.0.113.1:1234", derp.ClientInfo{})
+	v6 := addDebugTestClient(s, key.NewNode().Public(), "[2001:db8::1]:1234", derp.ClientInfo{})
+	mapped := addDebugTestClient(s, key.NewNode().Public(), "[::ffff:203.0.113.2]:1234", derp.ClientInfo{})
+	other := addDebugTestClient(s, key.NewNode().Public(), "203.0.113.99:1234", derp.ClientInfo{})
+
+	rc := RateConfig{
+		PerClientRateLimitBytesPerSec: testRate,
+		PerClientRateBurstBytes:       testBurst,
+		ExemptAddrs: []netip.Addr{
+			netip.MustParseAddr("203.0.113.1"),
+			netip.MustParseAddr("2001:db8::1"),
+			netip.MustParseAddr("203.0.113.2"),
+			netip.MustParseAddr("::ffff:203.0.113.1"), // dup of 203.0.113.1 once unmapped
+			{}, // invalid; ignored
+		},
+	}
+	applied := s.UpdateRateLimits(rc)
+	wantApplied := []netip.Addr{
+		netip.MustParseAddr("203.0.113.1"),
+		netip.MustParseAddr("2001:db8::1"),
+		netip.MustParseAddr("203.0.113.2"),
+	}
+	if !reflect.DeepEqual(applied.ExemptAddrs, wantApplied) {
+		t.Errorf("applied.ExemptAddrs = %v; want %v", applied.ExemptAddrs, wantApplied)
+	}
+
+	wantLimited(t, "v4", v4, false)
+	wantLimited(t, "v6", v6, false)
+	wantLimited(t, "v4-mapped", mapped, false)
+	wantLimited(t, "other", other, true)
+	verifyLimiter(t, other.recvLim.Load(), applied)
+
+	// Exempt rateLimit calls are a no-op.
+	v4.ctx = context.Background()
+	if err := v4.rateLimit(minRateLimitTokenBucketSize * 10); err != nil {
+		t.Fatalf("exempt rateLimit: %v", err)
+	}
+
+	// Clients registered after the config is applied honor the exemption.
+	lateExempt := addDebugTestClient(s, key.NewNode().Public(), "[2001:db8::1]:5678", derp.ClientInfo{})
+	lateOther := addDebugTestClient(s, key.NewNode().Public(), "[2001:db8::2]:5678", derp.ClientInfo{})
+	wantLimited(t, "lateExempt", lateExempt, false)
+	wantLimited(t, "lateOther", lateOther, true)
+
+	// Removing an address from the exempt list applies the limit to it.
+	rc.ExemptAddrs = []netip.Addr{netip.MustParseAddr("2001:db8::1")}
+	s.UpdateRateLimits(rc)
+	wantLimited(t, "v4", v4, true)
+	wantLimited(t, "v6", v6, false)
+	wantLimited(t, "v4-mapped", mapped, true)
+	wantLimited(t, "lateExempt", lateExempt, false)
+
+	// Disabling rate limiting clears the exempt list and all limiters.
+	if got := s.UpdateRateLimits(RateConfig{ExemptAddrs: rc.ExemptAddrs}); !reflect.DeepEqual(got, RateConfig{}) {
+		t.Errorf("applied = %+v; want zero", got)
+	}
+	if s.rateExemptAddrs.Len() != 0 {
+		t.Errorf("rateExemptAddrs = %v; want empty", s.rateExemptAddrs)
+	}
+	for name, c := range map[string]*sclient{"v4": v4, "v6": v6, "other": other, "lateOther": lateOther} {
+		wantLimited(t, name, c, false)
+	}
+}
+
 func TestLoadRateConfig(t *testing.T) {
 	for _, tt := range []struct {
 		name           string
@@ -1898,6 +2010,10 @@ func TestLoadRateConfig(t *testing.T) {
 			PerClientRateLimitBytesPerSec: 1,
 		}},
 		{"zeros", `{"PerClientRateLimitBytesPerSec": 0, "PerClientRateBurstBytes": 0}`, RateConfig{}},
+		{"exempt_addrs", `{"PerClientRateLimitBytesPerSec": 1, "ExemptAddrs": ["192.0.2.1", "2001:db8::1"]}`, RateConfig{
+			PerClientRateLimitBytesPerSec: 1,
+			ExemptAddrs:                   []netip.Addr{netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("2001:db8::1")},
+		}},
 		{"empty_json", `{}`, RateConfig{}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1923,6 +2039,9 @@ func TestLoadRateConfig(t *testing.T) {
 		{"empty_path", "", ""},
 		{"missing_file", filepath.Join(t.TempDir(), "nonexistent.json"), ""},
 		{"invalid_json", "", "not json"},
+		{"invalid_exempt_addr", "", `{"ExemptAddrs": ["not-an-ip"]}`},
+		{"empty_exempt_addr", "", `{"ExemptAddrs": [""]}`},
+		{"exempt_prefix_not_addr", "", `{"ExemptAddrs": ["192.0.2.0/24"]}`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			path := tt.path
@@ -2589,20 +2708,18 @@ func TestPacketBufPool(t *testing.T) {
 	}
 }
 
-// frameSeqConn is a derp.Conn that parses the DERP frames written to
-// it. It expects each packet frame's payload to end in a big-endian
-// uint32 sequence number, and records the highest one written before
-// the first pong.
-type frameSeqConn struct {
-	mu           sync.Mutex
-	partial      []byte // bytes of a frame not yet fully written
-	packets      int    // packet frames written
-	maxSeq       uint32 // highest sequence number written
-	pongs        int    // pong frames written
-	maxSeqAtPong uint32 // maxSeq when the first pong was written
+// frameCountConn is a derp.Conn that parses the DERP frames written to
+// it, counting packet frames and recording how many preceded the first
+// pong.
+type frameCountConn struct {
+	mu            sync.Mutex
+	partial       []byte // bytes of a frame not yet fully written
+	packets       int    // packet frames written
+	pongs         int    // pong frames written
+	packetsAtPong int    // packets when the first pong was written
 }
 
-func (c *frameSeqConn) Write(p []byte) (int, error) {
+func (c *frameCountConn) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.partial = append(c.partial, p...)
@@ -2612,14 +2729,12 @@ func (c *frameSeqConn) Write(p []byte) (int, error) {
 		if len(c.partial) < derp.FrameHeaderLen+fl {
 			break
 		}
-		payload := c.partial[derp.FrameHeaderLen : derp.FrameHeaderLen+fl]
 		switch ft {
 		case derp.FrameRecvPacket:
 			c.packets++
-			c.maxSeq = max(c.maxSeq, binary.BigEndian.Uint32(payload[len(payload)-4:]))
 		case derp.FramePong:
 			if c.pongs == 0 {
-				c.maxSeqAtPong = c.maxSeq
+				c.packetsAtPong = c.packets
 			}
 			c.pongs++
 		}
@@ -2628,28 +2743,28 @@ func (c *frameSeqConn) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (c *frameSeqConn) stats() (packets, pongs int, maxSeqAtPong uint32) {
+func (c *frameCountConn) stats() (packets, pongs, packetsAtPong int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.packets, c.pongs, c.maxSeqAtPong
+	return c.packets, c.pongs, c.packetsAtPong
 }
 
-func (c *frameSeqConn) Close() error                     { return nil }
-func (c *frameSeqConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
-func (c *frameSeqConn) SetDeadline(time.Time) error      { return nil }
-func (c *frameSeqConn) SetReadDeadline(time.Time) error  { return nil }
-func (c *frameSeqConn) SetWriteDeadline(time.Time) error { return nil }
+func (c *frameCountConn) Close() error                     { return nil }
+func (c *frameCountConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
+func (c *frameCountConn) SetDeadline(time.Time) error      { return nil }
+func (c *frameCountConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *frameCountConn) SetWriteDeadline(time.Time) error { return nil }
 
 // TestWriterFloodDoesNotStarveControlFrames checks that a sender
 // keeping a client's send queue topped up can't hold the writer in its
 // packet drain forever: a pong queued during the flood is written
-// after at most a queue's depth worth of the packets enqueued after it.
+// after at most a queue's depth worth of further packets.
 func TestWriterFloodDoesNotStarveControlFrames(t *testing.T) {
 	s := New(key.NewNode(), t.Logf)
 	defer s.Close()
-	depth := uint32(s.perClientSendQueueDepth)
+	depth := s.perClientSendQueueDepth
 
-	conn := &frameSeqConn{}
+	conn := &frameCountConn{}
 	c := &sclient{
 		s:    s,
 		key:  key.NewNode().Public(),
@@ -2660,9 +2775,7 @@ func TestWriterFloodDoesNotStarveControlFrames(t *testing.T) {
 	c.runWriterFunc = c.runWriter
 
 	// Flood the queue from another goroutine, faster than the writer
-	// drains it, so dequeue always reports more packets behind. Each
-	// packet carries its sequence number.
-	var seq atomic.Uint32
+	// drains it, so dequeue always reports more packets behind.
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	src := key.NewNode().Public()
@@ -2673,9 +2786,7 @@ func TestWriterFloodDoesNotStarveControlFrames(t *testing.T) {
 				return
 			default:
 			}
-			var bs [4]byte
-			binary.BigEndian.PutUint32(bs[:], seq.Add(1))
-			if err := c.sendPkt(c, pkt{bs: bs[:], src: src}); err != nil {
+			if err := c.sendPkt(c, pkt{bs: []byte("data"), src: src}); err != nil {
 				t.Errorf("sendPkt: %v", err)
 				return
 			}
@@ -2705,17 +2816,21 @@ func TestWriterFloodDoesNotStarveControlFrames(t *testing.T) {
 	})
 
 	c.queuePong([8]byte{'p', 'o', 'n', 'g'})
-	seqAtPong := seq.Load()
+	// Count packets, not sequence numbers: the queue drops at its head
+	// when full, so the packets written after the pong can be far
+	// newer than those queued with it. This is read after queuePong so
+	// a preemption here can only loosen the bound.
+	sentAtQueue := int(c.packetsSent.Load())
 	waitFor("the pong to be written", func() bool {
 		_, pongs, _ := conn.stats()
 		return pongs > 0
 	})
 	// The pass in progress may finish its budget of depth packets
 	// first, and then the pong goes out before the next pass's packets,
-	// so at most depth packets enqueued after the pong precede it.
-	_, _, maxSeqAtPong := conn.stats()
-	if maxSeqAtPong > seqAtPong+depth {
-		t.Errorf("pong written after packet %d; want no later than packet %d (pong queued at %d, depth %d)", maxSeqAtPong, seqAtPong+depth, seqAtPong, depth)
+	// so at most depth more packets precede it.
+	_, _, packetsAtPong := conn.stats()
+	if got := packetsAtPong - sentAtQueue; got > depth {
+		t.Errorf("pong written after %d more packets; want at most %d (the queue depth)", got, depth)
 	}
 }
 

@@ -61,13 +61,14 @@ func (menu *Menu) Run(client *local.Client) {
 	menu.lc = client
 	menu.updateState()
 
-	// exit cleanly on SIGINT and SIGTERM
+	// Stop the tray loop, which calls onExit to clean up background work.
+	interrupt := make(chan os.Signal, 1)
+	signal.Notify(interrupt, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(interrupt)
 	go func() {
-		interrupt := make(chan os.Signal, 1)
-		signal.Notify(interrupt, syscall.SIGINT, syscall.SIGTERM)
 		select {
 		case <-interrupt:
-			menu.onExit()
+			systray.Quit()
 		case <-menu.bgCtx.Done():
 		}
 	}()
@@ -749,7 +750,7 @@ func onClick(ctx context.Context, item *systray.MenuItem, fn func(ctx context.Co
 }
 
 // watchIPNBus subscribes to the tailscale event bus and sends state updates to chState.
-// This method does not return.
+// It returns when the menu exits.
 func (menu *Menu) watchIPNBus() {
 	bo := backoff.NewBackoff("TailDNS IPN bus", log.Printf, 3*time.Second)
 	for {
@@ -775,7 +776,7 @@ func (menu *Menu) watchIPNBusInner() error {
 	for {
 		select {
 		case <-menu.bgCtx.Done():
-			return nil
+			return menu.bgCtx.Err()
 		default:
 			n, err := watcher.Next()
 			if err != nil {
@@ -1106,6 +1107,8 @@ func newMullvadPeers(status *ipnstate.Status) mullvadPeers {
 // onExit is called by the systray package when the menu is exiting.
 func (menu *Menu) onExit() {
 	log.Printf("exiting")
+	menu.mu.Lock()
+	defer menu.mu.Unlock()
 	if menu.bgCancel != nil {
 		menu.bgCancel()
 	}

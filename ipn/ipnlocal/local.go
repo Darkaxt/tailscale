@@ -389,6 +389,7 @@ type LocalBackend struct {
 	// hostinfo is mutated in-place while mu is held.
 	hostinfo          *tailcfg.Hostinfo      // TODO(nickkhyl): move to nodeBackend
 	nmExpiryTimer     tstime.TimerController // for updating netMap on node expiry; can be nil; TODO(nickkhyl): move to nodeBackend
+	nmExpiryAt        time.Time              // wall time at which nmExpiryTimer should fire
 	activeLogin       string                 // last logged LoginName from netMap; TODO(nickkhyl): move to nodeBackend (or remove? it's in [ipn.LoginProfile]).
 	engineStatus      ipn.EngineStatus
 	endpoints         []tailcfg.Endpoint
@@ -1261,6 +1262,14 @@ func (b *LocalBackend) linkChange(delta *netmon.ChangeDelta) {
 	portalChanged := b.syncWindowsCaptiveNetworkLocked()
 	b.wakeWindowsCaptivePortalLocked()
 
+	if delta.TimeJumped() && b.nmExpiryTimer != nil {
+		// The timer runs on monotonic time, which on most platforms
+		// does not advance while the device is asleep. Reschedule it
+		// against the wall clock so that a key that expired during
+		// sleep is handled now rather than a sleep's duration late.
+		b.nmExpiryTimer.Reset(max(0, b.nmExpiryAt.Sub(b.clock.Now())))
+	}
+
 	b.pauseOrResumeControlClientLocked()
 	prefs := b.pm.CurrentPrefs()
 	if delta.RebindLikelyRequired && prefs.AutoExitNode().IsSet() {
@@ -1997,6 +2006,9 @@ func (b *LocalBackend) setControlClientStatusLocked(c controlclient.Client, st c
 		nextExpiry := b.em.nextPeerExpiry(st.NetMap, now)
 		if !nextExpiry.IsZero() {
 			tmrDuration := nextExpiry.Sub(now) + 10*time.Second
+			// From time package's docs: "The canonical way to strip a
+			// monotonic clock reading is to use t = t.Round(0)."
+			b.nmExpiryAt = now.Add(tmrDuration).Round(0)
 			b.nmExpiryTimer = b.clock.AfterFunc(tmrDuration, func() {
 				b.handleNetmapExpiry(c, st, currCall, tmrDuration)
 			})
@@ -2021,7 +2033,7 @@ func (b *LocalBackend) setControlClientStatusLocked(c controlclient.Client, st c
 		b.blockEngineUpdatesLocked(false)
 	}
 
-	if st.LoggedIn && (wasBlocked || authWasInProgress) {
+	if st.LoggedIn && !b.keyExpired && (wasBlocked || authWasInProgress) {
 		if wasBlocked {
 			// Auth completed, unblock the engine
 			b.blockEngineUpdatesLocked(false)
@@ -2056,7 +2068,7 @@ func (b *LocalBackend) setControlClientStatusLocked(c controlclient.Client, st c
 			prefs.Persist = st.Persist.AsStruct()
 		}
 	}
-	if st.LoggedIn {
+	if st.LoggedIn && !b.keyExpired {
 		if authWasInProgress {
 			b.resetAuthURLLocked()
 			// Interactive login finished successfully (URL visited).
@@ -5743,12 +5755,6 @@ func (b *LocalBackend) onEditPrefsLocked(_ ipnauth.Actor, mp *ipn.MaskedPrefs, o
 		}
 	}
 
-	if mp.AdvertiseServicesSet {
-		if ns, ok := b.sys.Netstack.GetOK(); ok {
-			ns.UpdateActiveVIPServices(newPrefs.AdvertiseServices())
-		}
-	}
-
 	// This is recorded here in the EditPrefs path, not the setPrefs path on purpose.
 	// recordForEdit records metrics related to edits and changes, not the final state.
 	// If, in the future, we want to record gauge-metrics related to the state of prefs,
@@ -5971,6 +5977,15 @@ func (b *LocalBackend) setPrefsLocked(newp *ipn.Prefs) ipn.PrefsView {
 	b.pauseOrResumeControlClientLocked() // for prefs.Sync changes
 	b.updateWarnSync(prefs)
 	b.updateNoSNATExitNodeWarning(prefs)
+
+	// Netstack handles traffic to a Tailscale Service IP locally only when
+	// this node advertises that Service. Update its set here so that every
+	// path that changes prefs keeps it current, including config file reloads.
+	if buildfeatures.HasServe && (!oldp.Valid() || !views.SliceEqual(oldp.AdvertiseServices(), prefs.AdvertiseServices())) {
+		if ns, ok := b.sys.Netstack.GetOK(); ok {
+			ns.UpdateActiveVIPServices(prefs.AdvertiseServices())
+		}
+	}
 
 	if oldp.ShieldsUp() != newp.ShieldsUp || hostInfoChanged {
 		b.doSetHostinfoFilterServicesLocked()
