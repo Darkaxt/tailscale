@@ -350,6 +350,9 @@ type testDNSServerOptions struct {
 	// nothing listens, so the connect fails fast instead.
 	HangTCP bool
 
+	// HangUDP reads UDP queries and never answers them.
+	HangUDP bool
+
 	// ResponseDelay is how long the server waits before answering, on either
 	// transport.
 	ResponseDelay time.Duration
@@ -472,6 +475,9 @@ func runDNSServer(tb testing.TB, opts *testDNSServerOptions, response []byte, on
 
 	handleUDP := func(addr netip.AddrPort, req []byte) {
 		onRequest(false, req)
+		if opts != nil && opts.HangUDP {
+			return
+		}
 		if opts != nil && opts.ResponseDelay > 0 {
 			time.Sleep(opts.ResponseDelay)
 		}
@@ -1369,44 +1375,27 @@ func TestForwarderRaceLoserNoReadError(t *testing.T) {
 	request := makeTestRequest(t, domain, dns.TypeA, 0)
 	answer := makeTestResponse(t, domain, dns.RCodeSuccess, netip.MustParseAddr("127.0.0.1"))
 
-	// Observe the losing query before releasing its competitor's answer.
-	// Otherwise a fast winner can cancel a loser before it even writes/reads,
-	// and there is legitimately no losing read to count.
-	silentConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	silentSeen := make(chan struct{})
-	silentDone := make(chan struct{})
-	silentStop := make(chan struct{})
-	go func() {
-		defer close(silentDone)
-		buf := make([]byte, 65535)
-		for {
-			if _, _, err := silentConn.ReadFromUDP(buf); err != nil {
-				return
-			}
-			select {
-			case silentSeen <- struct{}{}:
-			case <-silentStop:
-				return
-			}
-		}
-	}()
-	t.Cleanup(func() {
-		close(silentStop)
-		silentConn.Close()
-		<-silentDone
-	})
-	silent := uint16(silentConn.LocalAddr().(*net.UDPAddr).Port)
+	// The answering resolver holds its UDP answer until the silent one has
+	// the query, so the losing sendUDP is past its write when the query ends.
+	silentGotUDP := make(chan struct{}, 1)
 	answering := runDNSServer(t, nil, answer, func(isTCP bool, gotRequest []byte) {
-		if !isTCP {
-			select {
-			case <-silentSeen:
-			case <-silentStop:
-			}
+		if isTCP {
+			return
+		}
+		select {
+		case <-silentGotUDP:
+		case <-time.After(5 * time.Second):
+			t.Errorf("silent resolver never got the UDP query")
 		}
 	})
+	// Bound on both transports but answering on neither, so its read is still
+	// blocked when the other resolver's answer ends the query.
+	silent := runDNSServer(t, &testDNSServerOptions{HangUDP: true, HangTCP: true},
+		answer, func(isTCP bool, gotRequest []byte) {
+			if !isTCP {
+				silentGotUDP <- struct{}{}
+			}
+		})
 
 	const queries = 20
 	beforeRead := metricDNSFwdUDPErrorRead.Value()
