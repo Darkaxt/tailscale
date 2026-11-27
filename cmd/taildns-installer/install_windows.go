@@ -122,7 +122,7 @@ func platformInstall(payloadDir string, manifest releaseManifest, dnsEndpoint st
 			return
 		}
 		if rollbackErr := restoreRecord(service, paths, record); rollbackErr != nil {
-			retErr = fmt.Errorf("%w; automatic rollback also failed: %v", retErr, rollbackErr)
+			retErr = restartAfterFailedRollback(service, fmt.Errorf("%w; automatic rollback also failed: %v", retErr, rollbackErr))
 			return
 		}
 		if removeErr := os.Remove(paths.Record); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
@@ -244,7 +244,7 @@ func platformUpdate(payloadDir string, manifest releaseManifest) (result install
 			return
 		}
 		if rollbackErr := restoreRecord(service, paths, rollback); rollbackErr != nil {
-			retErr = fmt.Errorf("%w; automatic update rollback also failed: %v", retErr, rollbackErr)
+			retErr = restartAfterFailedRollback(service, fmt.Errorf("%w; automatic update rollback also failed: %v", retErr, rollbackErr))
 			return
 		}
 		result.RolledBack = true
@@ -345,7 +345,7 @@ func platformRollback() (installResult, error) {
 		return installResult{}, errors.New("service image path differs from the deployment record")
 	}
 	if err := restoreRecord(service, paths, record); err != nil {
-		return installResult{}, err
+		return installResult{}, restartAfterFailedRollback(service, err)
 	}
 	after, err := readIdentity(paths.CLI)
 	if err != nil {
@@ -926,11 +926,71 @@ func replaceFile(source, destination string) error {
 	if err != nil {
 		return err
 	}
-	r1, _, callErr := replaceFileW.Call(uintptr(unsafe.Pointer(dst)), uintptr(unsafe.Pointer(src)), 0, 1, 0, 0)
-	if r1 == 0 {
-		return fmt.Errorf("atomically replacing %s: %w", destination, callErr)
+	// ReplaceFile must delete the destination. Windows refuses while another
+	// process holds it open without delete sharing (a hash or version read,
+	// an antivirus scan); a mapped image may also block it. Regression
+	// 2026-11-27: this failed the +76 core update and its rollback, leaving
+	// the Tailscale service stopped. Such handles are transient, so move the
+	// image aside when possible and otherwise retry for a bounded time.
+	deadline := time.Now().Add(replaceRetryWindow)
+	for {
+		r1, _, callErr := replaceFileW.Call(uintptr(unsafe.Pointer(dst)), uintptr(unsafe.Pointer(src)), 0, 1, 0, 0)
+		if r1 != 0 {
+			return nil
+		}
+		asideErr := replaceByRenamingAside(source, destination)
+		if asideErr == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("atomically replacing %s: %w; rename-aside fallback: %v", destination, callErr, asideErr)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// replaceRetryWindow bounds how long a transiently locked image is retried.
+var replaceRetryWindow = time.Minute
+
+// asideSuffix marks a replaced image moved out of the way while still in use.
+const asideSuffix = ".taildns-old-"
+
+func replaceByRenamingAside(source, destination string) error {
+	removeStaleAside(destination)
+	aside := fmt.Sprintf("%s%s%d", destination, asideSuffix, time.Now().UnixNano())
+	if err := moveFile(destination, aside); err != nil {
+		return fmt.Errorf("moving in-use %s aside: %w", destination, err)
+	}
+	if err := moveFile(source, destination); err != nil {
+		if restoreErr := moveFile(aside, destination); restoreErr != nil {
+			return fmt.Errorf("installing %s: %w; restoring original also failed: %v", destination, err, restoreErr)
+		}
+		return fmt.Errorf("installing %s: %w", destination, err)
+	}
+	if err := os.Remove(aside); err != nil {
+		// Still mapped: delete it once its last user exits or at reboot.
+		if p, perr := windows.UTF16PtrFromString(aside); perr == nil {
+			_ = windows.MoveFileEx(p, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT)
+		}
 	}
 	return nil
+}
+
+// removeStaleAside deletes images earlier updates moved aside, when no longer in use.
+func removeStaleAside(destination string) {
+	matches, _ := filepath.Glob(destination + asideSuffix + "*")
+	for _, path := range matches {
+		_ = os.Remove(path)
+	}
+}
+
+// restartAfterFailedRollback makes sure a failed rollback never leaves the
+// tunnel down: the service is started with whatever daemon is now in place.
+func restartAfterFailedRollback(service *mgr.Service, err error) error {
+	if startErr := startService(service); startErr != nil {
+		return fmt.Errorf("%w; restarting the Tailscale service also failed: %v", err, startErr)
+	}
+	return fmt.Errorf("%w; Tailscale service restarted", err)
 }
 
 func moveFile(source, destination string) error {
