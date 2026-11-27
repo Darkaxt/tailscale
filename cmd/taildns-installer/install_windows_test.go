@@ -6,10 +6,15 @@
 package main
 
 import (
+	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestValidateBaselineVersionAllowsARealCoreUpgrade(t *testing.T) {
@@ -163,5 +168,127 @@ func TestDeploymentRecordCoversMatchingTrayPayload(t *testing.T) {
 	}
 	if _, preserved := withoutGUI.PreservedComponentHash["tailscale-ipn.exe"]; preserved {
 		t.Fatalf("missing proprietary GUI was recorded as preserved: %#v", withoutGUI.PreservedComponentHash)
+	}
+}
+
+// Regression 2026-11-27: ReplaceFile cannot delete an image that a running
+// process still maps, which failed the +76 core update and its rollback and
+// left the Tailscale service stopped. The replacement must still succeed.
+func TestReplaceFromPayloadReplacesRunningExecutable(t *testing.T) {
+	dir := t.TempDir()
+	running := filepath.Join(dir, "tailscale.exe")
+	ping, err := os.ReadFile(filepath.Join(os.Getenv("SystemRoot"), "System32", "PING.EXE"))
+	if err != nil {
+		t.Skipf("PING.EXE unavailable: %v", err)
+	}
+	if err := os.WriteFile(running, ping, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(running, "-n", "60", "127.0.0.1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+
+	payload := filepath.Join(dir, "payload.exe")
+	want := []byte("new core image")
+	if err := os.WriteFile(payload, want, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceFromPayload(payload, running); err != nil {
+		t.Fatalf("replacing a running executable: %v", err)
+	}
+	got, err := os.ReadFile(running)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("destination was not replaced")
+	}
+	if _, err := os.Stat(running + ".taildns-staged"); !os.IsNotExist(err) {
+		t.Fatalf("staged file left behind: %v", err)
+	}
+
+	// Once the old image is no longer in use, the next replacement removes it.
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+	if err := replaceFromPayload(payload, running); err != nil {
+		t.Fatal(err)
+	}
+	if left, _ := filepath.Glob(running + asideSuffix + "*"); len(left) != 0 {
+		t.Fatalf("stale aside images left behind: %v", left)
+	}
+}
+
+// The 2026-11-27 failure mode: another process holds the installed image open
+// without delete sharing, so ReplaceFile and a rename both fail until it closes.
+func TestReplaceFromPayloadWaitsForTransientLock(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "tailscaled.exe")
+	if err := os.WriteFile(destination, []byte("old core image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	name, err := windows.UTF16PtrFromString(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(1500 * time.Millisecond)
+		windows.CloseHandle(handle)
+		close(released)
+	}()
+	defer func() { <-released }()
+
+	payload := filepath.Join(dir, "payload.exe")
+	want := []byte("new core image")
+	if err := os.WriteFile(payload, want, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceFromPayload(payload, destination); err != nil {
+		t.Fatalf("replacing a transiently locked executable: %v", err)
+	}
+	got, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("destination was not replaced")
+	}
+}
+
+func TestReplaceFromPayloadGivesUpAfterRetryWindow(t *testing.T) {
+	previous := replaceRetryWindow
+	replaceRetryWindow = time.Second
+	defer func() { replaceRetryWindow = previous }()
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "tailscale.exe")
+	if err := os.WriteFile(destination, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	name, _ := windows.UTF16PtrFromString(destination)
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(handle)
+	payload := filepath.Join(dir, "payload.exe")
+	if err := os.WriteFile(payload, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceFromPayload(payload, destination); err == nil {
+		t.Fatal("replacement of a permanently locked file reported success")
+	}
+	if got, _ := os.ReadFile(destination); string(got) != "old" {
+		t.Fatalf("original changed after failed replacement: %q", got)
+	}
+	if _, err := os.Stat(destination + ".taildns-staged"); !os.IsNotExist(err) {
+		t.Fatalf("staged file left behind: %v", err)
 	}
 }
